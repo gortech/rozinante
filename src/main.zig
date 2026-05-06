@@ -1,8 +1,9 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const rozinante = @import("rozinante");
-const chess = rozinante.chess;
 const renderer = rozinante.tui.renderer;
+const Game = rozinante.tui.game.Game;
+const input = rozinante.tui.input;
 
 pub const Panic = struct {
     pub const call = panicHandler;
@@ -76,13 +77,18 @@ pub fn main(init: std.process.Init) !void {
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), std.Io.Duration.fromMilliseconds(3000));
 
-    const board = chess.Board.initial;
+    var game_state = Game.init();
 
     while (true) {
         const event = try loop.nextEvent();
         switch (event) {
             .key_press => |key| {
-                if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) break;
+                const action = input.handleKeyPress(&game_state, key);
+                switch (action) {
+                    .quit => break,
+                    .render => game_state.tickFlash(),
+                    .none => {},
+                }
             },
             .winsize => |ws| {
                 try vx.resize(alloc, tty.writer(), ws);
@@ -111,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
             .width = board_w,
             .height = board_h,
         });
-        renderer.renderBoard(board_win, board, mode, false);
+        renderer.renderBoard(board_win, &game_state, mode);
 
         const info_win = win.child(.{
             .x_off = @intCast(board_w + 1),

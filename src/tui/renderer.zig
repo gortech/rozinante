@@ -3,6 +3,7 @@ const Cell = vaxis.Cell;
 const Color = Cell.Color;
 const Window = vaxis.Window;
 const chess = @import("../chess.zig");
+const Game = @import("game.zig").Game;
 
 pub const Theme = struct {
     pub const bg: Color = .{ .rgb = .{ 15, 15, 35 } };
@@ -12,6 +13,11 @@ pub const Theme = struct {
     pub const black_piece: Color = .{ .rgb = .{ 40, 40, 60 } };
     pub const text_primary: Color = .{ .rgb = .{ 192, 202, 245 } };
     pub const text_dim: Color = .{ .rgb = .{ 100, 110, 150 } };
+    pub const highlight_cursor: Color = .{ .rgb = .{ 255, 0, 255 } };
+    pub const highlight_selected: Color = .{ .rgb = .{ 180, 0, 255 } };
+    pub const highlight_legal: Color = .{ .rgb = .{ 0, 200, 255 } };
+    pub const highlight_check: Color = .{ .rgb = .{ 255, 50, 50 } };
+    pub const highlight_flash: Color = .{ .rgb = .{ 255, 0, 0 } };
 };
 
 pub const RenderMode = enum {
@@ -48,7 +54,7 @@ fn pieceColor(p: chess.Piece) Color {
     return Theme.bg;
 }
 
-fn squareColor(file: u3, rank: u3) Color {
+fn baseSquareColor(file: u3, rank: u3) Color {
     if ((file + rank) % 2 == 0) return Theme.dark_square;
     return Theme.light_square;
 }
@@ -59,14 +65,45 @@ fn boardSquare(display_row: u3, display_col: u3, flipped: bool) u6 {
     return @as(u6, rank) * 8 + @as(u6, file);
 }
 
-pub fn renderBoard(win: Window, board: chess.Board, mode: RenderMode, flipped: bool) void {
+fn squareHighlight(game: *const Game, sq_idx: u6) ?Color {
+    if (game.flash_square) |fs| {
+        if (fs.toIndex() == sq_idx and game.flash_timer > 0)
+            return Theme.highlight_flash;
+    }
+
+    if (game.cursor.toIndex() == sq_idx)
+        return Theme.highlight_cursor;
+
+    if (game.selected) |sel| {
+        if (sel.toIndex() == sq_idx)
+            return Theme.highlight_selected;
+    }
+
+    if (game.legal_targets[sq_idx])
+        return Theme.highlight_legal;
+
+    if (game.isKingInCheck()) {
+        if (game.activeKingSquare()) |king_sq| {
+            if (king_sq.toIndex() == sq_idx)
+                return Theme.highlight_check;
+        }
+    }
+
+    return null;
+}
+
+fn resolveSquareColor(game: *const Game, sq_idx: u6, display_col: u3, display_row: u3) Color {
+    return squareHighlight(game, sq_idx) orelse baseSquareColor(display_col, display_row);
+}
+
+pub fn renderBoard(win: Window, game: *const Game, mode: RenderMode) void {
     switch (mode) {
-        .spacious => renderSpacious(win, board, flipped),
-        .compact => renderCompact(win, board, flipped),
+        .spacious => renderSpacious(win, game),
+        .compact => renderCompact(win, game),
     }
 }
 
-fn renderSpacious(win: Window, board: chess.Board, flipped: bool) void {
+fn renderSpacious(win: Window, game: *const Game) void {
     const cell_w: u16 = 6;
     const cell_h: u16 = 3;
     const label_w: u16 = 2;
@@ -74,7 +111,7 @@ fn renderSpacious(win: Window, board: chess.Board, flipped: bool) void {
 
     for (0..8) |dr| {
         const display_row: u3 = @intCast(dr);
-        const rank_label: u8 = if (flipped) '1' + @as(u8, display_row) else '8' - @as(u8, display_row);
+        const rank_label: u8 = if (game.flipped) '1' + @as(u8, display_row) else '8' - @as(u8, display_row);
 
         const ry: u16 = @as(u16, display_row) * cell_h;
         win.writeCell(0, ry + 1, .{
@@ -84,9 +121,9 @@ fn renderSpacious(win: Window, board: chess.Board, flipped: bool) void {
 
         for (0..8) |dc| {
             const display_col: u3 = @intCast(dc);
-            const sq_idx = boardSquare(display_row, display_col, flipped);
-            const piece = board.squares[sq_idx];
-            const bg = squareColor(display_col, display_row);
+            const sq_idx = boardSquare(display_row, display_col, game.flipped);
+            const piece = game.board.squares[sq_idx];
+            const bg = resolveSquareColor(game, sq_idx, display_col, display_row);
 
             const cx: u16 = label_w + @as(u16, display_col) * cell_w;
 
@@ -111,7 +148,7 @@ fn renderSpacious(win: Window, board: chess.Board, flipped: bool) void {
 
     for (0..8) |dc| {
         const display_col: u3 = @intCast(dc);
-        const file_label: u8 = if (flipped) 'h' - @as(u8, display_col) else 'a' + @as(u8, display_col);
+        const file_label: u8 = if (game.flipped) 'h' - @as(u8, display_col) else 'a' + @as(u8, display_col);
         const cx: u16 = label_w + @as(u16, display_col) * cell_w + cell_w / 2;
         const fy: u16 = 8 * cell_h + label_h - 1;
         win.writeCell(cx, fy, .{
@@ -121,13 +158,13 @@ fn renderSpacious(win: Window, board: chess.Board, flipped: bool) void {
     }
 }
 
-fn renderCompact(win: Window, board: chess.Board, flipped: bool) void {
+fn renderCompact(win: Window, game: *const Game) void {
     const cell_w: u16 = 2;
     const label_w: u16 = 2;
 
     for (0..8) |dr| {
         const display_row: u3 = @intCast(dr);
-        const rank_label: u8 = if (flipped) '1' + @as(u8, display_row) else '8' - @as(u8, display_row);
+        const rank_label: u8 = if (game.flipped) '1' + @as(u8, display_row) else '8' - @as(u8, display_row);
         const ry: u16 = @intCast(dr);
 
         win.writeCell(0, ry, .{
@@ -137,9 +174,9 @@ fn renderCompact(win: Window, board: chess.Board, flipped: bool) void {
 
         for (0..8) |dc| {
             const display_col: u3 = @intCast(dc);
-            const sq_idx = boardSquare(display_row, display_col, flipped);
-            const piece = board.squares[sq_idx];
-            const bg = squareColor(display_col, display_row);
+            const sq_idx = boardSquare(display_row, display_col, game.flipped);
+            const piece = game.board.squares[sq_idx];
+            const bg = resolveSquareColor(game, sq_idx, display_col, display_row);
 
             const cx: u16 = label_w + @as(u16, display_col) * cell_w;
 
@@ -162,7 +199,7 @@ fn renderCompact(win: Window, board: chess.Board, flipped: bool) void {
     const fy: u16 = 8;
     for (0..8) |dc| {
         const display_col: u3 = @intCast(dc);
-        const file_label: u8 = if (flipped) 'h' - @as(u8, display_col) else 'a' + @as(u8, display_col);
+        const file_label: u8 = if (game.flipped) 'h' - @as(u8, display_col) else 'a' + @as(u8, display_col);
         const cx: u16 = label_w + @as(u16, display_col) * cell_w;
         win.writeCell(cx, fy, .{
             .char = .{ .grapheme = &.{file_label}, .width = 1 },
