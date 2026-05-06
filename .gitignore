@@ -1,8 +1,35 @@
 ### Project ###
+.scratchpad/
 
 ### AI Agents ###
 .specs/scratchpad/
 .codemap/
+
+# ── GSD baseline (auto-generated) ──
+.gsd
+.gsd-id
+.mcp.json
+.bg-shell/
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+*.code-workspace
+.env.*
+!.env.example
+node_modules/
+.next/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+vendor/
+*.log
+coverage/
+.cache/
+tmp/
 
 ### dotenv ###
 .env
@@ -66,29 +93,3 @@ zig-out/
 build/
 build-*/
 docgen_tmp/
-
-# ── GSD baseline (auto-generated) ──
-.gsd
-.gsd-id
-.mcp.json
-.bg-shell/
-Thumbs.db
-*.swp
-*.swo
-.vscode/
-*.code-workspace
-.env.*
-!.env.example
-node_modules/
-.next/
-dist/
-__pycache__/
-*.pyc
-.venv/
-venv/
-target/
-vendor/
-*.log
-coverage/
-.cache/
-tmp/
