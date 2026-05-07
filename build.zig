@@ -83,11 +83,25 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
+    const preview_exe = b.addExecutable(.{
+        .name = "piece-preview",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/piece_preview.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "rozinante", .module = mod },
+                .{ .name = "vaxis", .module = vaxis_mod },
+            },
+        }),
+    });
+    b.installArtifact(preview_exe);
+
+    const preview_step = b.step("preview", "Run piece sprite preview");
+    const preview_cmd = b.addRunArtifact(preview_exe);
+    preview_step.dependOn(&preview_cmd.step);
+    preview_cmd.step.dependOn(b.getInstallStep());
+
     const run_step = b.step("run", "Run the app");
 
     // This creates a RunArtifact step in the build graph. A RunArtifact step

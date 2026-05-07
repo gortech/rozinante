@@ -136,10 +136,10 @@ test "Piece.isWhite and isBlack" {
 
 test "Piece.toChar and fromChar round-trip" {
     const pieces = [_]Piece{
-        .white_pawn,   .white_knight, .white_bishop,
-        .white_rook,   .white_queen,  .white_king,
-        .black_pawn,   .black_knight, .black_bishop,
-        .black_rook,   .black_queen,  .black_king,
+        .white_pawn, .white_knight, .white_bishop,
+        .white_rook, .white_queen,  .white_king,
+        .black_pawn, .black_knight, .black_bishop,
+        .black_rook, .black_queen,  .black_king,
     };
     for (pieces) |p| {
         try std.testing.expectEqual(p, Piece.fromChar(p.toChar()).?);

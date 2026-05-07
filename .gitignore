@@ -90,6 +90,7 @@ Temporary Items
 ### zig ###
 .zig-cache/
 zig-out/
+zig-pkg/
 build/
 build-*/
 docgen_tmp/
