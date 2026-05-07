@@ -51,6 +51,21 @@ const Event = union(enum) {
     cap_multi_cursor,
 };
 
+const SPACIOUS_MIN_W: u16 = 94;
+const SPACIOUS_MIN_H: u16 = 33;
+const COMPACT_MIN_W: u16 = 50;
+const COMPACT_MIN_H: u16 = 18;
+
+fn selectRenderOpts(width: u16, height: u16) ?renderer.RenderOptions {
+    if (width >= SPACIOUS_MIN_W and height >= SPACIOUS_MIN_H) {
+        return renderer.RenderOptions{};
+    }
+    if (width >= COMPACT_MIN_W and height >= COMPACT_MIN_H) {
+        return renderer.compact_options;
+    }
+    return null;
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const alloc = init.arena.allocator();
@@ -100,25 +115,32 @@ pub fn main(init: std.process.Init) !void {
         win.clear();
         win.fill(.{ .style = .{ .bg = renderer.Theme.bg } });
 
-        const opts = renderer.RenderOptions{};
-        const board_w = renderer.boardWidth(opts);
-        const board_h = renderer.boardHeight(opts);
+        const maybe_opts = selectRenderOpts(win.width, win.height);
 
-        const board_win = win.child(.{
-            .x_off = 0,
-            .y_off = 0,
-            .width = board_w,
-            .height = board_h,
-        });
-        renderer.renderBoard(board_win, &game_state, opts);
+        if (maybe_opts) |opts| {
+            const board_w = renderer.boardWidth(opts);
+            const board_h = renderer.boardHeight(opts);
 
-        const info_win = win.child(.{
-            .x_off = @intCast(board_w + 1),
-            .y_off = 0,
-            .width = if (win.width > board_w + 1) win.width - board_w - 1 else 0,
-            .height = board_h,
-        });
-        renderer.renderInfoPanel(info_win);
+            const board_win = win.child(.{
+                .x_off = 0,
+                .y_off = 0,
+                .width = board_w,
+                .height = board_h,
+            });
+            renderer.renderBoard(board_win, &game_state, opts);
+
+            const info_x: u16 = board_w + 1;
+            const info_w = if (win.width > info_x) win.width - info_x else 0;
+            const info_win = win.child(.{
+                .x_off = @intCast(info_x),
+                .y_off = 0,
+                .width = info_w,
+                .height = board_h,
+            });
+            renderer.renderInfoPanel(info_win, &game_state);
+        } else {
+            renderer.renderResizeMessage(win);
+        }
 
         try vx.render(tty.writer());
     }

@@ -28,6 +28,136 @@ pub const PromotionPending = struct {
     selected_idx: u2,
 };
 
+pub const FanNotation = struct {
+    buf: [24]u8,
+    len: u8,
+
+    pub fn slice(self: *const FanNotation) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+pub const promotion_pieces = [4]chess.PieceType{ .queen, .rook, .bishop, .knight };
+
+pub fn pieceSymbol(pt: chess.PieceType, color: chess.Color) []const u8 {
+    return switch (color) {
+        .white => switch (pt) {
+            .king => "\u{2654}",
+            .queen => "\u{2655}",
+            .rook => "\u{2656}",
+            .bishop => "\u{2657}",
+            .knight => "\u{2658}",
+            .pawn => "\u{2659}",
+        },
+        .black => switch (pt) {
+            .king => "\u{265A}",
+            .queen => "\u{265B}",
+            .rook => "\u{265C}",
+            .bishop => "\u{265D}",
+            .knight => "\u{265E}",
+            .pawn => "\u{265F}",
+        },
+    };
+}
+
+fn computeFan(record: MoveRecord, board_before: *const chess.Board, board_after: *const chess.Board) FanNotation {
+    var fan: FanNotation = .{ .buf = .{0} ** 24, .len = 0 };
+    const m = record.move;
+    const pt = record.piece.pieceType() orelse return fan;
+    const color = record.piece.color() orelse return fan;
+    var pos: u8 = 0;
+
+    if (m.move_type == .castle) {
+        if (@intFromEnum(m.to.file) > @intFromEnum(m.from.file)) {
+            const s = "O-O";
+            @memcpy(fan.buf[pos..][0..s.len], s);
+            pos += s.len;
+        } else {
+            const s = "O-O-O";
+            @memcpy(fan.buf[pos..][0..s.len], s);
+            pos += s.len;
+        }
+    } else {
+        if (pt != .pawn) {
+            const sym = pieceSymbol(pt, color);
+            @memcpy(fan.buf[pos..][0..sym.len], sym);
+            pos += @intCast(sym.len);
+
+            const legal = chess.legalMoves(board_before);
+            var need_file = false;
+            var need_rank = false;
+            var ambiguous = false;
+            for (legal.moves[0..legal.len]) |lm| {
+                if (lm.to.eql(m.to) and !lm.from.eql(m.from)) {
+                    const other = board_before.pieceAt(lm.from);
+                    if (other.pieceType() == pt and other.color() == color) {
+                        ambiguous = true;
+                        if (lm.from.file == m.from.file) need_rank = true;
+                        if (lm.from.rank == m.from.rank) need_file = true;
+                    }
+                }
+            }
+            if (ambiguous) {
+                if (!need_file and !need_rank) {
+                    fan.buf[pos] = m.from.file.toChar();
+                    pos += 1;
+                } else if (need_file and need_rank) {
+                    fan.buf[pos] = m.from.file.toChar();
+                    pos += 1;
+                    fan.buf[pos] = m.from.rank.toChar();
+                    pos += 1;
+                } else if (need_rank) {
+                    fan.buf[pos] = m.from.rank.toChar();
+                    pos += 1;
+                } else {
+                    fan.buf[pos] = m.from.file.toChar();
+                    pos += 1;
+                }
+            }
+        } else if (record.captured != null) {
+            fan.buf[pos] = m.from.file.toChar();
+            pos += 1;
+        }
+
+        if (record.captured != null) {
+            fan.buf[pos] = 'x';
+            pos += 1;
+        }
+
+        fan.buf[pos] = m.to.file.toChar();
+        pos += 1;
+        fan.buf[pos] = m.to.rank.toChar();
+        pos += 1;
+
+        if (m.move_type == .en_passant) {
+            const ep = " e.p.";
+            @memcpy(fan.buf[pos..][0..ep.len], ep);
+            pos += ep.len;
+        }
+
+        if (m.move_type == .promotion) {
+            fan.buf[pos] = '=';
+            pos += 1;
+            if (m.promotion_piece) |pp| {
+                const sym = pieceSymbol(pp, color);
+                @memcpy(fan.buf[pos..][0..sym.len], sym);
+                pos += @intCast(sym.len);
+            }
+        }
+    }
+
+    if (chess.isCheckmate(board_after)) {
+        fan.buf[pos] = '#';
+        pos += 1;
+    } else if (chess.isInCheck(board_after, board_after.active_color)) {
+        fan.buf[pos] = '+';
+        pos += 1;
+    }
+
+    fan.len = pos;
+    return fan;
+}
+
 pub const Game = struct {
     board: chess.Board,
     cursor: chess.Square,
@@ -37,6 +167,7 @@ pub const Game = struct {
     move_count: usize,
     board_history: [512]chess.Board,
     board_count: usize,
+    fan_history: [512]FanNotation,
     game_phase: GamePhase,
     result: ?[]const u8,
     white_opponent: Opponent,
@@ -56,6 +187,7 @@ pub const Game = struct {
             .move_count = 0,
             .board_history = undefined,
             .board_count = 0,
+            .fan_history = undefined,
             .game_phase = .playing,
             .result = null,
             .white_opponent = .human,
@@ -75,7 +207,24 @@ pub const Game = struct {
 
         if (self.selected) |sel| {
             if (self.legal_targets[self.cursor.toIndex()]) {
-                self.executeMove(sel, self.cursor);
+                const piece = self.board.pieceAt(sel);
+                if (piece.pieceType()) |pt| {
+                    if (pt == .pawn) {
+                        if (piece.color()) |c| {
+                            if ((c == .white and self.cursor.rank == .@"8") or
+                                (c == .black and self.cursor.rank == .@"1"))
+                            {
+                                self.promotion_pending = .{
+                                    .from = sel,
+                                    .to = self.cursor,
+                                    .selected_idx = 0,
+                                };
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.executeMove(sel, self.cursor, null);
                 return;
             }
 
@@ -107,17 +256,19 @@ pub const Game = struct {
         self.legal_targets = [_]bool{false} ** 64;
     }
 
-    pub fn executeMove(self: *Game, from: chess.Square, to: chess.Square) void {
+    pub fn executeMove(self: *Game, from: chess.Square, to: chess.Square, promotion: ?chess.PieceType) void {
         const legal = chess.legalMoves(&self.board);
         var matching_move: ?chess.Move = null;
 
         for (legal.moves[0..legal.len]) |m| {
             if (m.from.eql(from) and m.to.eql(to)) {
                 if (m.move_type == .promotion) {
-                    if (m.promotion_piece) |pp| {
-                        if (pp == .queen) {
-                            matching_move = m;
-                            break;
+                    if (promotion) |pp| {
+                        if (m.promotion_piece) |mp| {
+                            if (mp == pp) {
+                                matching_move = m;
+                                break;
+                            }
                         }
                     }
                     continue;
@@ -147,14 +298,13 @@ pub const Game = struct {
         else
             null;
 
-        if (self.move_count < 512) {
-            self.move_history[self.move_count] = .{
-                .move = m,
-                .piece = piece,
-                .captured = captured,
-            };
-            self.move_count += 1;
-        }
+        const record = MoveRecord{
+            .move = m,
+            .piece = piece,
+            .captured = captured,
+        };
+
+        const board_before = self.board;
 
         if (self.board_count < 512) {
             self.board_history[self.board_count] = self.board;
@@ -162,6 +312,12 @@ pub const Game = struct {
         }
 
         self.board = chess.makeMove(self.board, m);
+
+        if (self.move_count < 512) {
+            self.fan_history[self.move_count] = computeFan(record, &board_before, &self.board);
+            self.move_history[self.move_count] = record;
+            self.move_count += 1;
+        }
 
         self.selected = null;
         self.legal_targets = [_]bool{false} ** 64;
@@ -184,6 +340,29 @@ pub const Game = struct {
         }
     }
 
+    pub fn confirmPromotion(self: *Game) void {
+        const promo = self.promotion_pending orelse return;
+        const piece_type = promotion_pieces[promo.selected_idx];
+        self.promotion_pending = null;
+        self.executeMove(promo.from, promo.to, piece_type);
+    }
+
+    pub fn cancelPromotion(self: *Game) void {
+        self.promotion_pending = null;
+    }
+
+    pub fn cyclePromotionNext(self: *Game) void {
+        var pp = self.promotion_pending orelse return;
+        pp.selected_idx +%= 1;
+        self.promotion_pending = pp;
+    }
+
+    pub fn cyclePromotionPrev(self: *Game) void {
+        var pp = self.promotion_pending orelse return;
+        pp.selected_idx -%= 1;
+        self.promotion_pending = pp;
+    }
+
     pub fn undoMove(self: *Game) void {
         if (self.board_count == 0) return;
 
@@ -198,6 +377,7 @@ pub const Game = struct {
         self.legal_targets = [_]bool{false} ** 64;
         self.game_phase = .playing;
         self.result = null;
+        self.promotion_pending = null;
     }
 
     pub fn newGame(self: *Game) void {
