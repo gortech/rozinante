@@ -33,15 +33,6 @@ pub const RenderOptions = struct {
     show_pieces: bool = true,
 };
 
-pub const compact_options = RenderOptions{
-    .cell_w = 3,
-    .cell_h = 2,
-    .label_w = 2,
-    .label_h = 1,
-    .show_labels = true,
-    .show_pieces = true,
-};
-
 fn pieceColor(p: chess.Piece) Color {
     if (p.isWhite()) return Theme.white_piece;
     if (p.isBlack()) return Theme.black_piece;
@@ -348,6 +339,20 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     renderCapturedRow(win, game, .black, 3, y);
     y += 1;
     y += 1;
+
+    // Opening line
+    if (game.current_opening) |opening| {
+        var col: u16 = 1;
+        const style: Cell.Style = if (game.opening_is_current)
+            .{ .fg = Theme.text_primary, .bg = Theme.bg }
+        else
+            .{ .fg = Theme.text_dim, .bg = Theme.bg };
+        col = writeStr(win, col, y, opening.eco, style);
+        col = writeStr(win, col, y, " ", style);
+        _ = writeStr(win, col, y, opening.name, style);
+        y += 1;
+        y += 1;
+    }
 
     // Move history
     const keybind_lines: u16 = 3;

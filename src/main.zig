@@ -9,7 +9,12 @@ const input = rozinante.tui.input;
 const Menu = rozinante.tui.menu.Menu;
 const MenuAction = rozinante.tui.menu.MenuAction;
 const engine_mod = rozinante.engine;
+const openings = rozinante.openings;
 const Io = std.Io;
+
+pub const std_options: std.Options = .{
+    .log_level = .warn,
+};
 
 pub const Panic = struct {
     pub const call = panicHandler;
@@ -72,17 +77,12 @@ fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Engin
     event_loop.postEvent(.engine_move_ready) catch {};
 }
 
-const SPACIOUS_MIN_W: u16 = 94;
-const SPACIOUS_MIN_H: u16 = 33;
-const COMPACT_MIN_W: u16 = 50;
-const COMPACT_MIN_H: u16 = 18;
+const MIN_W: u16 = 94;
+const MIN_H: u16 = 33;
 
 fn selectRenderOpts(width: u16, height: u16) ?renderer.RenderOptions {
-    if (width >= SPACIOUS_MIN_W and height >= SPACIOUS_MIN_H) {
+    if (width >= MIN_W and height >= MIN_H) {
         return renderer.RenderOptions{};
-    }
-    if (width >= COMPACT_MIN_W and height >= COMPACT_MIN_H) {
-        return renderer.compact_options;
     }
     return null;
 }
@@ -197,6 +197,9 @@ pub fn main(init: std.process.Init) !void {
     var engine_result: EngineResult = .{};
     var engine_board: chess.Board = undefined;
 
+    const opening_book = try alloc.create(openings.OpeningBook);
+    opening_book.* = openings.OpeningBook.init();
+
     main_loop: while (true) {
         // --- Menu phase ---
         var menu_state = Menu{};
@@ -246,8 +249,8 @@ pub fn main(init: std.process.Init) !void {
             .random => if (@mod(Io.Timestamp.now(io, .awake).nanoseconds, 2) == 0) .white else .black,
         };
 
-        // Init game with player color
-        var game_state = Game.initWithColor(player_color);
+        // Init game with player color and opening book
+        var game_state = Game.initWithColorAndBook(player_color, opening_book);
 
         // If engine goes first (player is black), dispatch immediately
         if (game_state.isEngineTurn()) {
@@ -255,6 +258,9 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // --- Game phase ---
+        renderGame(&vx, &game_state);
+        try vx.render(tty.writer());
+
         game_loop: while (true) {
             // When engine is thinking, poll with timeout for spinner animation
             const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting)

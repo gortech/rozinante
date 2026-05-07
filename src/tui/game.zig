@@ -1,4 +1,5 @@
 const chess = @import("../chess.zig");
+const openings = @import("../openings.zig");
 
 pub const Opponent = enum {
     human,
@@ -189,12 +190,19 @@ pub const Game = struct {
     thinking_elapsed_s: u16,
     spinner_idx: u2,
     player_color: chess.Color,
+    opening_book: ?*const openings.OpeningBook,
+    current_opening: ?openings.Opening,
+    opening_is_current: bool,
 
     pub fn init() Game {
         return initWithColor(.white);
     }
 
     pub fn initWithColor(player_color: chess.Color) Game {
+        return initWithColorAndBook(player_color, null);
+    }
+
+    pub fn initWithColorAndBook(player_color: chess.Color, book: ?*const openings.OpeningBook) Game {
         return .{
             .board = chess.Board.initial,
             .cursor = chess.Square.init(.e, .@"2"),
@@ -220,6 +228,9 @@ pub const Game = struct {
             .thinking_elapsed_s = 0,
             .spinner_idx = 0,
             .player_color = player_color,
+            .opening_book = book,
+            .current_opening = null,
+            .opening_is_current = true,
         };
     }
 
@@ -346,6 +357,8 @@ pub const Game = struct {
         self.selected = null;
         self.legal_targets = [_]bool{false} ** 64;
 
+        self.updateOpening();
+
         if (chess.isCheckmate(&self.board)) {
             self.game_phase = .ended;
             self.result = if (self.board.active_color == .white)
@@ -405,7 +418,52 @@ pub const Game = struct {
     }
 
     pub fn newGame(self: *Game) void {
+        const book = self.opening_book;
         self.* = init();
+        self.opening_book = book;
+    }
+
+    fn updateOpening(self: *Game) void {
+        const book = self.opening_book orelse return;
+
+        // Build UCI sequence from move history
+        var uci_buf: [512 * 6]u8 = undefined;
+        var uci_len: usize = 0;
+        for (self.move_history[0..self.move_count]) |record| {
+            if (uci_len > 0) {
+                uci_buf[uci_len] = ' ';
+                uci_len += 1;
+            }
+            var move_buf: [5]u8 = undefined;
+            const uci_str = record.move.toUci(&move_buf);
+            @memcpy(uci_buf[uci_len..][0..uci_str.len], uci_str);
+            uci_len += uci_str.len;
+        }
+
+        // Build EPD from current board (first 4 FEN fields)
+        var fen_buf: [128]u8 = undefined;
+        const fen = self.board.toFen(&fen_buf);
+        const epd = extractEpd(fen);
+
+        const result = book.find(uci_buf[0..uci_len], epd);
+        if (result) |opening| {
+            self.current_opening = opening;
+            self.opening_is_current = true;
+        } else {
+            self.opening_is_current = false;
+        }
+    }
+
+    fn extractEpd(fen: []const u8) []const u8 {
+        // EPD = first 4 space-separated fields of FEN
+        var spaces: usize = 0;
+        for (fen, 0..) |c, i| {
+            if (c == ' ') {
+                spaces += 1;
+                if (spaces == 4) return fen[0..i];
+            }
+        }
+        return fen;
     }
 
     pub fn flipBoard(self: *Game) void {
