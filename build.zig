@@ -28,17 +28,15 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    const vaxis_dep = b.dependency("vaxis", .{});
+    const vaxis_mod = vaxis_dep.module("vaxis");
+
     const mod = b.addModule("rozinante", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
         .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
         .target = target,
+        .imports = &.{
+            .{ .name = "vaxis", .module = vaxis_mod },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -73,12 +71,8 @@ pub fn build(b: *std.Build) void {
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
-                // Here "rozinante" is the name you will use in your source code to
-                // import this module (e.g. `@import("rozinante")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
                 .{ .name = "rozinante", .module = mod },
+                .{ .name = "vaxis", .module = vaxis_mod },
             },
         }),
     });
@@ -89,11 +83,25 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
+    const preview_exe = b.addExecutable(.{
+        .name = "piece-preview",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/piece_preview.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "rozinante", .module = mod },
+                .{ .name = "vaxis", .module = vaxis_mod },
+            },
+        }),
+    });
+    b.installArtifact(preview_exe);
+
+    const preview_step = b.step("preview", "Run piece sprite preview");
+    const preview_cmd = b.addRunArtifact(preview_exe);
+    preview_step.dependOn(&preview_cmd.step);
+    preview_cmd.step.dependOn(b.getInstallStep());
+
     const run_step = b.step("run", "Run the app");
 
     // This creates a RunArtifact step in the build graph. A RunArtifact step
