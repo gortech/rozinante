@@ -21,6 +21,7 @@ pub const Theme = struct {
     pub const highlight_check: Color = .{ .rgb = .{ 255, 50, 50 } };
     pub const highlight_flash: Color = .{ .rgb = .{ 255, 0, 0 } };
     pub const highlight_promotion: Color = .{ .rgb = .{ 255, 200, 0 } };
+    pub const highlight_engine_move: Color = .{ .rgb = .{ 0, 220, 180 } };
 };
 
 pub const RenderOptions = struct {
@@ -62,6 +63,11 @@ fn squareHighlight(game: *const Game, sq_idx: u6) ?Color {
     if (game.flash_square) |fs| {
         if (fs.toIndex() == sq_idx and game.flash_timer > 0)
             return Theme.highlight_flash;
+    }
+
+    if (game.engine_last_move) |em| {
+        if (em.from.toIndex() == sq_idx or em.to.toIndex() == sq_idx)
+            return Theme.highlight_engine_move;
     }
 
     if (game.cursor.toIndex() == sq_idx)
@@ -309,6 +315,16 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
             _ = writeStr(win, 1, y, result, .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         }
         y += 1;
+    } else if (game.engine_state == .thinking) {
+        const spinners = [_][]const u8{ "|", "/", "-", "\\" };
+        var col = writeStr(win, 1, y, spinners[game.spinner_idx], .{ .fg = Theme.highlight_cursor, .bg = Theme.bg });
+        col = writeStr(win, col, y, " Engine thinking... (", .{ .fg = Theme.text_primary, .bg = Theme.bg });
+        col = writeNum(win, col, y, game.thinking_elapsed_s, .{ .fg = Theme.text_primary, .bg = Theme.bg });
+        _ = writeStr(win, col, y, "s)", .{ .fg = Theme.text_primary, .bg = Theme.bg });
+        y += 1;
+    } else if (game.engine_state == .@"error" or game.engine_state == .reconnecting) {
+        _ = writeStr(win, 1, y, "Engine reconnecting...", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        y += 1;
     } else {
         const status_str = if (game.board.active_color == .white) "White to move" else "Black to move";
         const col = writeStr(win, 1, y, status_str, .{ .fg = Theme.text_primary, .bg = Theme.bg });
@@ -370,7 +386,7 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     const hint_y = win.height -| 2;
     if (hint_y > y) {
         _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        _ = writeStr(win, 1, hint_y + 1, "U Undo N New F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        _ = writeStr(win, 1, hint_y + 1, "R Resign N Menu F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
     }
 }
 

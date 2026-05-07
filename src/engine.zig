@@ -66,7 +66,7 @@ pub const Engine = struct {
 
     pub fn deinit(self: *Engine) void {
         self.sendCommand("quit") catch {};
-        self.stdin_writer.interface.flush(&self.stdin_writer.interface) catch {};
+        self.stdin_writer.interface.flush() catch {};
         self.child.kill(self.io);
         self.is_ready = false;
     }
@@ -96,7 +96,7 @@ pub const Engine = struct {
         const writer = &self.stdin_writer.interface;
         try writer.writeAll(cmd);
         try writer.writeAll("\n");
-        try writer.flush(writer);
+        try writer.flush();
     }
 
     fn readLine(self: *Engine, buf: *[4096]u8) ![]const u8 {
@@ -106,7 +106,7 @@ pub const Engine = struct {
             error.StreamTooLong => return EngineError.InvalidUciResponse,
             else => return err,
         };
-        const trimmed = std.mem.trimRight(u8, line, "\r");
+        const trimmed = std.mem.trimEnd(u8, line, "\r");
         @memcpy(buf[0..trimmed.len], trimmed);
         return buf[0..trimmed.len];
     }

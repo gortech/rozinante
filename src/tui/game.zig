@@ -1,14 +1,20 @@
 const chess = @import("../chess.zig");
 
-pub const Opponent = union(enum) {
+pub const Opponent = enum {
     human,
+    engine,
+};
 
-    pub fn getMove(self: Opponent, board: *const chess.Board) ?chess.Move {
-        _ = board;
-        return switch (self) {
-            .human => null,
-        };
-    }
+pub const EngineState = enum {
+    idle,
+    thinking,
+    @"error",
+    reconnecting,
+};
+
+pub const LastMove = struct {
+    from: chess.Square,
+    to: chess.Square,
 };
 
 pub const MoveRecord = struct {
@@ -176,8 +182,19 @@ pub const Game = struct {
     flash_square: ?chess.Square,
     flash_timer: u8,
     promotion_pending: ?PromotionPending,
+    engine_state: EngineState,
+    engine_last_move: ?LastMove,
+    engine_last_move_timer: u8,
+    thinking_start_ns: i96,
+    thinking_elapsed_s: u16,
+    spinner_idx: u2,
+    player_color: chess.Color,
 
     pub fn init() Game {
+        return initWithColor(.white);
+    }
+
+    pub fn initWithColor(player_color: chess.Color) Game {
         return .{
             .board = chess.Board.initial,
             .cursor = chess.Square.init(.e, .@"2"),
@@ -190,12 +207,19 @@ pub const Game = struct {
             .fan_history = undefined,
             .game_phase = .playing,
             .result = null,
-            .white_opponent = .human,
-            .black_opponent = .human,
-            .flipped = false,
+            .white_opponent = if (player_color == .white) .human else .engine,
+            .black_opponent = if (player_color == .black) .human else .engine,
+            .flipped = player_color == .black,
             .flash_square = null,
             .flash_timer = 0,
             .promotion_pending = null,
+            .engine_state = .idle,
+            .engine_last_move = null,
+            .engine_last_move_timer = 0,
+            .thinking_start_ns = 0,
+            .thinking_elapsed_s = 0,
+            .spinner_idx = 0,
+            .player_color = player_color,
         };
     }
 
@@ -421,6 +445,23 @@ pub const Game = struct {
             self.flash_timer -= 1;
             if (self.flash_timer == 0) {
                 self.flash_square = null;
+            }
+        }
+    }
+
+    pub fn isEngineTurn(self: *const Game) bool {
+        if (self.game_phase != .playing) return false;
+        return switch (self.board.active_color) {
+            .white => self.white_opponent == .engine,
+            .black => self.black_opponent == .engine,
+        };
+    }
+
+    pub fn tickEngineHighlight(self: *Game) void {
+        if (self.engine_last_move_timer > 0) {
+            self.engine_last_move_timer -= 1;
+            if (self.engine_last_move_timer == 0) {
+                self.engine_last_move = null;
             }
         }
     }
