@@ -194,7 +194,7 @@ pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
 
 const digit_strs = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 
-fn writeStr(win: Window, x: u16, y: u16, text: []const u8, style: Cell.Style) u16 {
+pub fn writeStr(win: Window, x: u16, y: u16, text: []const u8, style: Cell.Style) u16 {
     var col = x;
     var i: usize = 0;
     while (i < text.len) {
@@ -212,7 +212,7 @@ fn writeStr(win: Window, x: u16, y: u16, text: []const u8, style: Cell.Style) u1
     return col;
 }
 
-fn writeNum(win: Window, x: u16, y: u16, n: u16, style: Cell.Style) u16 {
+pub fn writeNum(win: Window, x: u16, y: u16, n: u16, style: Cell.Style) u16 {
     if (n == 0) {
         win.writeCell(x, y, .{ .char = .{ .grapheme = "0", .width = 1 }, .style = style });
         return x + 1;

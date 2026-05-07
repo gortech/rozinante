@@ -4,6 +4,8 @@ const rozinante = @import("rozinante");
 const renderer = rozinante.tui.renderer;
 const Game = rozinante.tui.game.Game;
 const input = rozinante.tui.input;
+const Menu = rozinante.tui.menu.Menu;
+const MenuAction = rozinante.tui.menu.MenuAction;
 
 pub const Panic = struct {
     pub const call = panicHandler;
@@ -92,6 +94,37 @@ pub fn main(init: std.process.Init) !void {
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), std.Io.Duration.fromMilliseconds(3000));
 
+    // Menu phase
+    var menu_state = Menu{};
+    var menu_done = false;
+
+    while (!menu_done) {
+        const event = try loop.nextEvent();
+        switch (event) {
+            .key_press => |key| {
+                const action = menu_state.handleInput(key);
+                switch (action) {
+                    .quit => return,
+                    .start => menu_done = true,
+                    .render, .none => {},
+                }
+            },
+            .winsize => |ws| {
+                try vx.resize(alloc, tty.writer(), ws);
+            },
+            else => {},
+        }
+
+        const win = vx.window();
+        win.clear();
+        menu_state.render(win);
+        try vx.render(tty.writer());
+    }
+
+    const config = menu_state.getConfig();
+    _ = config;
+
+    // Game phase
     var game_state = Game.init();
 
     while (true) {
