@@ -4,6 +4,7 @@ const Io = std.Io;
 
 pub const chess = @import("chess.zig");
 pub const engine = @import("engine.zig");
+pub const openings = @import("openings.zig");
 pub const tui = @import("tui.zig");
 
 test {
