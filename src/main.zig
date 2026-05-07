@@ -173,22 +173,22 @@ pub fn main(init: std.process.Init) !void {
         global_vx = null;
     }
 
+    // Check for Stockfish before entering alt screen so errors are visible
+    const stockfish_path = engine_mod.findStockfish(io) catch {
+        const w = tty.writer();
+        w.writeAll("Error: Stockfish not found. Please install Stockfish:\r\n") catch {};
+        w.writeAll("  Ubuntu/Debian: sudo apt install stockfish\r\n") catch {};
+        w.writeAll("  macOS:         brew install stockfish\r\n") catch {};
+        w.writeAll("  Arch:          sudo pacman -S stockfish\r\n") catch {};
+        return;
+    };
+
     var loop: vaxis.Loop(Event) = .init(io, &tty, &vx);
     try loop.start();
     defer loop.stop();
 
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), Io.Duration.fromMilliseconds(3000));
-
-    // Check for Stockfish before showing menu
-    const stockfish_path = engine_mod.findStockfish(io) catch {
-        const log = std.log.scoped(.main);
-        log.err("Stockfish not found. Please install Stockfish:", .{});
-        log.err("  Ubuntu/Debian: sudo apt install stockfish", .{});
-        log.err("  macOS:         brew install stockfish", .{});
-        log.err("  Arch:          sudo pacman -S stockfish", .{});
-        return;
-    };
 
     var current_engine: ?engine_mod.Engine = null;
     defer {

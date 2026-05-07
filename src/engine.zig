@@ -265,6 +265,9 @@ pub fn findStockfish(io: Io) EngineError![]const u8 {
         if (canSpawn(io, path)) return path;
     }
 
+    // Fall back to PATH resolution
+    if (canSpawn(io, "stockfish")) return "stockfish";
+
     return EngineError.StockfishNotFound;
 }
 
