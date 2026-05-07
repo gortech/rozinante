@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const chess = @import("chess.zig");
+pub const engine = @import("engine.zig");
 pub const tui = @import("tui.zig");
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
