@@ -1,14 +1,27 @@
 const vaxis = @import("vaxis");
-const Game = @import("game.zig").Game;
+const game_mod = @import("game.zig");
+const Game = game_mod.Game;
 
 pub const Action = enum {
     quit,
     render,
     none,
+    resign,
+    new_game,
 };
 
 pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
     if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) return .quit;
+
+    // During engine thinking, only allow quit, resign, flip
+    if (game.engine_state == .thinking or game.engine_state == .reconnecting) {
+        if (key.matches('r', .{})) return .resign;
+        if (key.matches('f', .{})) {
+            game.flipBoard();
+            return .render;
+        }
+        return .none;
+    }
 
     // Promotion input mode
     if (game.promotion_pending != null) {
@@ -57,14 +70,8 @@ pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
         return .render;
     }
 
-    if (key.matches('u', .{})) {
-        game.undoMove();
-        return .render;
-    }
-    if (key.matches('n', .{})) {
-        game.newGame();
-        return .render;
-    }
+    if (key.matches('r', .{})) return .resign;
+    if (key.matches('n', .{})) return .new_game;
     if (key.matches('f', .{})) {
         game.flipBoard();
         return .render;
