@@ -63,8 +63,8 @@ const EngineResult = struct {
     failed: bool = false,
 };
 
-fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, movetime: u32, result: *EngineResult, event_loop: *vaxis.Loop(Event)) void {
-    if (eng.getMove(board, movetime)) |m| {
+fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *EngineResult, event_loop: *vaxis.Loop(Event)) void {
+    if (eng.getMove(board)) |m| {
         result.move = m;
     } else |_| {
         result.failed = true;
@@ -95,7 +95,6 @@ fn dispatchEngineMove(
     engine_result: *EngineResult,
     engine_future: *?Io.Future(void),
     loop_ptr: *vaxis.Loop(Event),
-    elo: u16,
 ) void {
     engine_board.* = game_state.board;
     engine_result.* = .{};
@@ -105,7 +104,6 @@ fn dispatchEngineMove(
     engine_future.* = io.concurrent(engineWork, .{
         eng,
         engine_board,
-        engine_mod.eloToMovetime(elo),
         engine_result,
         loop_ptr,
     }) catch {
@@ -253,7 +251,7 @@ pub fn main(init: std.process.Init) !void {
 
         // If engine goes first (player is black), dispatch immediately
         if (game_state.isEngineTurn()) {
-            dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop, config.elo);
+            dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
         }
 
         // --- Game phase ---
@@ -295,7 +293,7 @@ pub fn main(init: std.process.Init) !void {
 
                                 // After human move, check if engine should go
                                 if (game_state.isEngineTurn() and game_state.engine_state == .idle) {
-                                    dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop, config.elo);
+                                    dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                                 }
                             },
                             .none => {},
@@ -317,7 +315,7 @@ pub fn main(init: std.process.Init) !void {
                                     continue :game_loop;
                                 };
                                 // Re-dispatch after restart
-                                dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop, config.elo);
+                                dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                             }
                         } else if (engine_result.move) |move| {
                             game_state.executeMove(move.from, move.to, if (move.move_type == .promotion) move.promotion_piece else null);

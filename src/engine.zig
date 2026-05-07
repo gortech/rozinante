@@ -75,9 +75,7 @@ pub const Engine = struct {
         try self.sendCommand("uci");
         try self.readUntilToken("uciok");
 
-        var elo_buf: [64]u8 = undefined;
-        const elo_cmd = std.fmt.bufPrint(&elo_buf, "setoption name UCI_LimitStrength value true", .{}) catch unreachable;
-        try self.sendCommand(elo_cmd);
+        try self.sendCommand("setoption name UCI_LimitStrength value true");
 
         var elo_val_buf: [64]u8 = undefined;
         const elo_val_cmd = std.fmt.bufPrint(&elo_val_buf, "setoption name UCI_Elo value {d}", .{self.elo}) catch unreachable;
@@ -121,7 +119,9 @@ pub const Engine = struct {
         return EngineError.EngineTimeout;
     }
 
-    pub fn getMove(self: *Engine, board: *const Board, movetime_ms: u32) !Move {
+    pub fn getMove(self: *Engine, board: *const Board) !Move {
+        try self.waitReady();
+
         var fen_buf: [128]u8 = undefined;
         const fen = board.toFen(&fen_buf);
 
@@ -131,7 +131,7 @@ pub const Engine = struct {
         try self.sendCommand(pos_cmd);
 
         var go_buf: [64]u8 = undefined;
-        const go_cmd = std.fmt.bufPrint(&go_buf, "go movetime {d}", .{movetime_ms}) catch
+        const go_cmd = std.fmt.bufPrint(&go_buf, "go depth {d} movetime {d}", .{ eloToDepth(self.elo), eloToMovetime(self.elo) }) catch
             return EngineError.InvalidUciResponse;
         try self.sendCommand(go_cmd);
 
@@ -139,7 +139,11 @@ pub const Engine = struct {
         var attempts: u32 = 0;
         while (attempts < 5000) : (attempts += 1) {
             const line = try self.readLine(&line_buf);
-            if (parseBestMove(line)) |uci_move| {
+            if (std.mem.startsWith(u8, line, "bestmove ")) {
+                const uci_move = parseBestMove(line) orelse {
+                    log.warn("engine returned unparseable bestmove: {s}", .{line});
+                    return EngineError.InvalidUciResponse;
+                };
                 return Move.fromUci(uci_move) orelse {
                     log.warn("invalid bestmove UCI string: {s}", .{uci_move});
                     return EngineError.InvalidUciResponse;
@@ -282,11 +286,28 @@ fn canSpawn(io: Io, path: []const u8) bool {
     return true;
 }
 
-pub fn eloToMovetime(elo: u16) u32 {
-    const clamped_elo: i32 = @intCast(std.math.clamp(elo, 800, 2500));
-    const result: i32 = 1000 + @divTrunc((clamped_elo - 800) * 2000, 1700);
-    return std.math.clamp(@as(u32, @intCast(result)), 500, 5000);
+pub fn eloToDepth(elo: u16) u8 {
+    const clamped: u16 = std.math.clamp(elo, 200, 2800);
+    if (clamped <= 600) return 1;
+    if (clamped <= 1000) return 2;
+    if (clamped <= 1400) return 4;
+    if (clamped <= 1800) return 8;
+    if (clamped <= 2200) return 12;
+    if (clamped <= 2500) return 16;
+    return 20;
 }
+
+pub fn eloToMovetime(elo: u16) u16 {
+    const clamped: u16 = std.math.clamp(elo, 200, 2800);
+    if (clamped <= 400) return 25;
+    if (clamped <= 800) return 50;
+    if (clamped <= 1200) return 120;
+    if (clamped <= 1600) return 500;
+    if (clamped <= 2000) return 2000;
+    if (clamped <= 2400) return 5000;
+    return 12000;
+}
+
 
 // --- Tests ---
 
@@ -345,26 +366,38 @@ test "parseInfoLine: empty info" {
     try std.testing.expectEqual(@as(u16, 0), result.depth);
 }
 
-test "eloToMovetime: at 800 (minimum)" {
-    try std.testing.expectEqual(@as(u32, 1000), eloToMovetime(800));
+test "eloToDepth: at 200 returns depth 1" {
+    try std.testing.expectEqual(@as(u8, 1), eloToDepth(200));
 }
 
-test "eloToMovetime: at 2500 (maximum)" {
-    try std.testing.expectEqual(@as(u32, 3000), eloToMovetime(2500));
+test "eloToDepth: at 2800 returns depth 20" {
+    try std.testing.expectEqual(@as(u8, 20), eloToDepth(2800));
 }
 
-test "eloToMovetime: at 1650 (midpoint)" {
-    const result = eloToMovetime(1650);
-    try std.testing.expect(result >= 1900 and result <= 2100);
+test "eloToDepth: at 1500 returns depth 8" {
+    try std.testing.expectEqual(@as(u8, 8), eloToDepth(1500));
 }
 
-test "eloToMovetime: below minimum clamps to 800" {
-    try std.testing.expectEqual(@as(u32, 1000), eloToMovetime(400));
+test "eloToDepth: below minimum clamps" {
+    try std.testing.expectEqual(@as(u8, 1), eloToDepth(100));
 }
 
-test "eloToMovetime: above maximum clamps to 2500" {
-    try std.testing.expectEqual(@as(u32, 3000), eloToMovetime(3000));
+test "eloToDepth: above maximum clamps" {
+    try std.testing.expectEqual(@as(u8, 20), eloToDepth(3000));
 }
+
+test "eloToMovetime: at 200 returns 25ms" {
+    try std.testing.expectEqual(@as(u16, 25), eloToMovetime(200));
+}
+
+test "eloToMovetime: at 2800 returns 12000ms" {
+    try std.testing.expectEqual(@as(u16, 12000), eloToMovetime(2800));
+}
+
+test "eloToMovetime: at 1000 returns 120ms" {
+    try std.testing.expectEqual(@as(u16, 120), eloToMovetime(1000));
+}
+
 
 test "Move.fromUci: promotion round-trip" {
     const m = Move.fromUci("e7e8q").?;

@@ -42,8 +42,8 @@ pub const Menu = struct {
     active_field: ActiveField = .elo,
     confirmed: bool = false,
 
-    const elo_min: u16 = 800;
-    const elo_max: u16 = 2500;
+    const elo_min: u16 = 200;
+    const elo_max: u16 = 2800;
     const elo_step: u16 = 100;
 
     pub fn handleInput(self: *Menu, key: vaxis.Key) MenuAction {
