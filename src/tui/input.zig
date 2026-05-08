@@ -13,9 +13,25 @@ pub const Action = enum {
 pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
     if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) return .quit;
 
-    // During engine thinking, only allow quit, resign, flip
+    // Resign confirmation mode
+    if (game.resign_pending) {
+        if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
+            game.resign_pending = false;
+            return .resign;
+        }
+        if (key.matches('n', .{}) or key.matches(vaxis.Key.escape, .{})) {
+            game.resign_pending = false;
+            return .render;
+        }
+        return .none;
+    }
+
+    // During engine thinking, only allow quit, resign prompt, flip
     if (game.engine_state == .thinking or game.engine_state == .reconnecting) {
-        if (key.matches('r', .{})) return .resign;
+        if (key.matches('r', .{})) {
+            game.resign_pending = true;
+            return .render;
+        }
         if (key.matches('f', .{})) {
             game.flipBoard();
             return .render;
@@ -70,7 +86,13 @@ pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
         return .render;
     }
 
-    if (key.matches('r', .{})) return .resign;
+    if (key.matches('r', .{})) {
+        if (game.game_phase == .playing) {
+            game.resign_pending = true;
+            return .render;
+        }
+        return .none;
+    }
     if (key.matches('n', .{})) return .new_game;
     if (key.matches('f', .{})) {
         game.flipBoard();

@@ -301,6 +301,9 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
         y += 1;
         _ = writeStr(win, 1, y, "\u{2190}\u{2192} cycle  Enter confirm  Esc cancel", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         y += 1;
+    } else if (game.resign_pending) {
+        _ = writeStr(win, 1, y, "Resign? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        y += 1;
     } else if (game.game_phase == .ended) {
         if (game.result) |result| {
             _ = writeStr(win, 1, y, result, .{ .fg = Theme.highlight_check, .bg = Theme.bg });

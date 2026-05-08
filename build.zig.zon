@@ -36,6 +36,10 @@
             .url = "git+https://github.com/rockorager/libvaxis.git#f3b69d1dad36bb644972a6a08639ab2eb2b98178",
             .hash = "vaxis-0.6.0-BWNV_PXUCQA7KBuY_oWB6Tsm4rcbr4NsfG9p5PledmOJ",
         },
+        .known_folders = .{
+            .url = "git+https://github.com/ziglibs/known-folders.git#207c34a16e4365edc20d92c7892f962b3bed46e8",
+            .hash = "known_folders-0.0.0-Fy-PJsbKAACbDh9bBxR0MMThxZSS6A9RH4apWphNHY70",
+        },
     },
     .paths = .{
         "build.zig",

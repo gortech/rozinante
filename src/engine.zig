@@ -64,6 +64,13 @@ pub const Engine = struct {
         return engine;
     }
 
+    /// Re-point internal reader/writer buffer pointers after the struct has been
+    /// moved in memory (e.g. returned by value from init).
+    pub fn relocate(self: *Engine) void {
+        self.stdin_writer = File.Writer.initStreaming(self.child.stdin.?, self.io, &self.stdin_buf);
+        self.stdout_reader = File.Reader.initStreaming(self.child.stdout.?, self.io, &self.stdout_buf);
+    }
+
     pub fn deinit(self: *Engine) void {
         self.sendCommand("quit") catch {};
         self.stdin_writer.interface.flush() catch {};
@@ -256,7 +263,11 @@ pub fn parseInfoLine(line: []const u8, result: *Analysis) void {
     }
 }
 
-pub fn findStockfish(io: Io) EngineError![]const u8 {
+pub fn findStockfish(io: Io, override: ?[]const u8) EngineError![]const u8 {
+    if (override) |path| {
+        if (canSpawn(io, path)) return path;
+    }
+
     const common_paths = [_][]const u8{
         "/usr/bin/stockfish",
         "/usr/local/bin/stockfish",
@@ -415,5 +426,5 @@ test "Move.fromUci: knight promotion" {
 test "findStockfish: function signature compiles" {
     // findStockfish requires a real Io from main(); we can only verify it compiles.
     // Integration testing with Stockfish is done via the game loop.
-    try std.testing.expect(@TypeOf(findStockfish) == fn (Io) EngineError![]const u8);
+    try std.testing.expect(@TypeOf(findStockfish) == fn (Io, ?[]const u8) EngineError![]const u8);
 }

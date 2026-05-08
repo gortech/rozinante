@@ -31,11 +31,15 @@ pub fn build(b: *std.Build) void {
     const vaxis_dep = b.dependency("vaxis", .{});
     const vaxis_mod = vaxis_dep.module("vaxis");
 
+    const known_folders_dep = b.dependency("known_folders", .{});
+    const known_folders_mod = known_folders_dep.module("known-folders");
+
     const mod = b.addModule("rozinante", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "vaxis", .module = vaxis_mod },
+            .{ .name = "known_folders", .module = known_folders_mod },
         },
     });
 
