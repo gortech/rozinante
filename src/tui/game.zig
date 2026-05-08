@@ -193,6 +193,7 @@ pub const Game = struct {
     opening_book: ?*const openings.OpeningBook,
     current_opening: ?openings.Opening,
     opening_is_current: bool,
+    resign_pending: bool,
 
     pub fn init() Game {
         return initWithColor(.white);
@@ -231,6 +232,7 @@ pub const Game = struct {
             .opening_book = book,
             .current_opening = null,
             .opening_is_current = true,
+            .resign_pending = false,
         };
     }
 

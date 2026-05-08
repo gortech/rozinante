@@ -8,9 +8,18 @@ const game_mod = rozinante.tui.game;
 const input = rozinante.tui.input;
 const Menu = rozinante.tui.menu.Menu;
 const MenuAction = rozinante.tui.menu.MenuAction;
+const PlayerColor = rozinante.tui.menu.PlayerColor;
+const HistoryScreen = rozinante.tui.history.HistoryScreen;
+const ViewerState = rozinante.tui.viewer.ViewerState;
 const engine_mod = rozinante.engine;
 const openings = rozinante.openings;
+const persistence = rozinante.persistence;
+const pgn = persistence.pgn;
+const storage = persistence.storage;
+const config = persistence.config;
 const Io = std.Io;
+
+const log = std.log.scoped(.persistence);
 
 pub const std_options: std.Options = .{
     .log_level = .warn,
@@ -152,6 +161,216 @@ fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
     }
 }
 
+fn formatPgnDate(buf: []u8, secs: i64) []const u8 {
+    const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(0, secs)) };
+    const year_day = epoch_secs.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>4}.{d:0>2}.{d:0>2}", .{
+        year_day.year,
+        @intFromEnum(month_day.month),
+        month_day.day_index + 1,
+    }) catch "????.??.??";
+}
+
+fn pgnResult(game_state: *const Game) []const u8 {
+    if (game_state.game_phase != .ended) return "*";
+    if (chess.isCheckmate(&game_state.board)) {
+        return if (game_state.board.active_color == .white) "0-1" else "1-0";
+    }
+    if (chess.isDraw(&game_state.board)) return "1/2-1/2";
+    // Resignation: the result string contains who resigned
+    if (game_state.result) |r| {
+        if (std.mem.indexOf(u8, r, "White resigns") != null) return "0-1";
+        if (std.mem.indexOf(u8, r, "Black resigns") != null) return "1-0";
+    }
+    return "*";
+}
+
+fn autoSave(
+    io: Io,
+    alloc: std.mem.Allocator,
+    game_state: *Game,
+    data_dir: []const u8,
+    current_save_path: *?[]const u8,
+    game_elo: u16,
+    player_color: chess.Color,
+    game_start_secs: i64,
+) void {
+    if (game_state.move_count == 0) return;
+
+    // Build board_history slice including current board for writePgn
+    // writePgn needs board_history[0..move_count] (boards before each move)
+    // plus board_history[move_count] (board after last move)
+    // Game stores board_history[0..board_count] where board_count == move_count
+    // (each executeMove pushes pre-move board). We need to temporarily append current board.
+    if (game_state.board_count < 512) {
+        game_state.board_history[game_state.board_count] = game_state.board;
+    }
+
+    const result_str = pgnResult(game_state);
+
+    var date_buf: [16]u8 = undefined;
+    const pgn_date = formatPgnDate(&date_buf, game_start_secs);
+
+    const color_str: []const u8 = if (player_color == .white) "white" else "black";
+    const header = pgn.PgnHeader{
+        .event = "Rozinante",
+        .site = "Local",
+        .date = pgn_date,
+        .white = if (player_color == .white) "Player" else "Stockfish",
+        .black = if (player_color == .black) "Player" else "Stockfish",
+        .result = result_str,
+    };
+
+    var pgn_buf: [32768]u8 = undefined;
+    const pgn_content = pgn.writePgn(
+        &pgn_buf,
+        header,
+        game_state.move_history[0..game_state.move_count],
+        game_state.board_history[0 .. game_state.board_count + 1],
+    ) catch {
+        log.warn("failed to serialize PGN for auto-save", .{});
+        return;
+    };
+
+    if (current_save_path.*) |existing_path| {
+        // Overwrite existing file
+        const dir = std.Io.Dir.cwd();
+        dir.writeFile(io, .{
+            .sub_path = existing_path,
+            .data = pgn_content,
+        }) catch |err| {
+            log.warn("failed to overwrite save file: {}", .{err});
+        };
+    } else {
+        // First save — generate filename
+        const path = storage.saveGame(alloc, io, data_dir, .{
+            .pgn_content = pgn_content,
+            .date_secs = game_start_secs,
+            .elo = game_elo,
+            .color = color_str,
+        }) catch |err| {
+            log.warn("failed to save game: {}", .{err});
+            return;
+        };
+        current_save_path.* = path;
+    }
+}
+
+const HistoryResult = enum {
+    back,
+    view_game,
+    resume_game,
+};
+
+fn runGameHistory(
+    io: Io,
+    alloc: std.mem.Allocator,
+    loop_ptr: *vaxis.Loop(Event),
+    vx: *vaxis.Vaxis,
+    tty: *vaxis.Tty,
+    history_games: *std.ArrayList(storage.GameInfo),
+    data_dir: []const u8,
+    selected_filepath: *?[]const u8,
+) HistoryResult {
+    var screen = HistoryScreen.init(history_games.*);
+
+    while (true) {
+        const win = vx.window();
+        screen.render(win);
+        vx.render(tty.writer()) catch return .back;
+
+        const event = loop_ptr.nextEvent() catch return .back;
+        switch (event) {
+            .key_press => |key| {
+                const action = screen.handleInput(key);
+                switch (action) {
+                    .back => return .back,
+                    .select_finished => {
+                        if (screen.selectedGame()) |g| {
+                            selected_filepath.* = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch null;
+                            const viewer_result = runGameViewer(io, alloc, loop_ptr, vx, tty, selected_filepath.*);
+                            if (viewer_result == .back_to_menu) return .back;
+                        }
+                    },
+                    .select_unfinished => {
+                        if (screen.selectedGame()) |g| {
+                            selected_filepath.* = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch null;
+                            return .resume_game;
+                        }
+                    },
+                    .delete => {
+                        if (screen.selectedGame()) |g| {
+                            const filepath = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch continue;
+                            storage.deleteGame(io, filepath) catch {};
+                            screen.removeAtCursor();
+                            history_games.* = screen.games;
+                        }
+                    },
+                    .none => {},
+                }
+            },
+            .winsize => |ws| {
+                vx.resize(alloc, tty.writer(), ws) catch {};
+            },
+            else => {},
+        }
+    }
+}
+
+const ViewerResult = enum {
+    back_to_history,
+    back_to_menu,
+};
+
+fn runGameViewer(
+    io: Io,
+    alloc: std.mem.Allocator,
+    loop_ptr: *vaxis.Loop(Event),
+    vx: *vaxis.Vaxis,
+    tty: *vaxis.Tty,
+    filepath: ?[]const u8,
+) ViewerResult {
+    const fp = filepath orelse return .back_to_history;
+    const pgn_content = storage.loadGame(alloc, io, fp) catch return .back_to_history;
+    const parsed = pgn.parsePgn(pgn_content) catch return .back_to_history;
+    const move_count = parsed.move_count;
+    if (move_count == 0) return .back_to_history;
+
+    var boards: [513]chess.Board = undefined;
+    boards[0] = chess.Board.initial;
+    var san_list: [512]pgn.SanNotation = undefined;
+    for (0..move_count) |i| {
+        const pm = parsed.moves[i];
+        const record = game_mod.MoveRecord{ .move = pm.move, .piece = pm.piece, .captured = pm.captured };
+        boards[i + 1] = chess.makeMove(boards[i], pm.move);
+        san_list[i] = pgn.computeSan(record, &boards[i], &boards[i + 1]);
+    }
+
+    var viewer = ViewerState.init(&boards, &san_list, move_count);
+
+    while (true) {
+        const win = vx.window();
+        viewer.render(win);
+        vx.render(tty.writer()) catch return .back_to_history;
+
+        const event = loop_ptr.nextEvent() catch return .back_to_history;
+        switch (event) {
+            .key_press => |key| {
+                const action = viewer.handleInput(key);
+                switch (action) {
+                    .back => return .back_to_history,
+                    .none => {},
+                }
+            },
+            .winsize => |ws| {
+                vx.resize(alloc, tty.writer(), ws) catch {};
+            },
+            else => {},
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const alloc = init.arena.allocator();
@@ -171,8 +390,26 @@ pub fn main(init: std.process.Init) !void {
         global_vx = null;
     }
 
-    // Check for Stockfish before entering alt screen so errors are visible
-    const stockfish_path = engine_mod.findStockfish(io) catch {
+    // --- Persistence setup ---
+    const data_dir = storage.getDataDir(alloc, io, init.environ_map) catch |err| {
+        log.warn("failed to resolve data directory: {}, persistence disabled", .{err});
+        return mainNoPersistence(init, io, alloc, &tty, &vx);
+    };
+    const config_dir = storage.getConfigDir(alloc, io, init.environ_map) catch |err| {
+        log.warn("failed to resolve config directory: {}, persistence disabled", .{err});
+        return mainNoPersistence(init, io, alloc, &tty, &vx);
+    };
+    storage.ensureDirExists(io, data_dir) catch {};
+    storage.ensureDirExists(io, config_dir) catch {};
+
+    // Load preferences
+    var prefs = config.loadPreferences(alloc, io, config_dir);
+
+    // Save defaults on first launch (creates config.json if missing)
+    config.savePreferences(alloc, io, prefs, config_dir) catch {};
+
+    // Find Stockfish (with preference override)
+    const stockfish_path = engine_mod.findStockfish(io, prefs.stockfish_path) catch {
         const w = tty.writer();
         w.writeAll("Error: Stockfish not found. Please install Stockfish:\r\n") catch {};
         w.writeAll("  Ubuntu/Debian: sudo apt install stockfish\r\n") catch {};
@@ -201,9 +438,35 @@ pub fn main(init: std.process.Init) !void {
     opening_book.* = openings.OpeningBook.init();
 
     main_loop: while (true) {
+        // --- Crash recovery: scan for unfinished games ---
+        var resume_filepath: ?[]const u8 = null;
+        var resume_elo: u16 = prefs.default_elo;
+        var resume_color: chess.Color = .white;
+
+        const games = storage.listGames(alloc, io, data_dir) catch &.{};
+        for (games) |g| {
+            if (!g.is_finished) {
+                // Build full filepath
+                resume_filepath = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch null;
+                resume_elo = g.elo;
+                if (std.mem.eql(u8, g.player_color, "black")) {
+                    resume_color = .black;
+                } else {
+                    resume_color = .white;
+                }
+                break;
+            }
+        }
+
         // --- Menu phase ---
         var menu_state = Menu{};
+        menu_state.selected_elo = prefs.default_elo;
+        menu_state.selected_color = PlayerColor.fromString(prefs.default_color);
+        menu_state.has_resume_game = resume_filepath != null;
+        menu_state.initActiveField();
+
         var menu_done = false;
+        var menu_action: MenuAction = .none;
 
         while (!menu_done) {
             const event = try loop.nextEvent();
@@ -212,7 +475,45 @@ pub fn main(init: std.process.Init) !void {
                     const action = menu_state.handleInput(key);
                     switch (action) {
                         .quit => return,
-                        .start => menu_done = true,
+                        .start => {
+                            menu_action = .start;
+                            menu_done = true;
+                        },
+                        .resume_game => {
+                            menu_action = .resume_game;
+                            menu_done = true;
+                        },
+                        .game_history => {
+                            var history_list: std.ArrayList(storage.GameInfo) = if (storage.listGames(alloc, io, data_dir)) |sl|
+                                std.ArrayList(storage.GameInfo).fromOwnedSlice(sl)
+                            else |_|
+                                std.ArrayList(storage.GameInfo).empty;
+                            var selected_fp: ?[]const u8 = null;
+                            const hist_result = runGameHistory(io, alloc, &loop, &vx, &tty, &history_list, data_dir, &selected_fp);
+                            if (hist_result == .resume_game) {
+                                if (selected_fp) |fp| {
+                                    // Parse the selected game to extract elo and color for resume
+                                    const basename = if (std.mem.lastIndexOfScalar(u8, fp, '/')) |idx| fp[idx + 1 ..] else fp;
+                                    resume_filepath = fp;
+                                    resume_elo = prefs.default_elo;
+                                    resume_color = .white;
+                                    // Extract elo and color from filename
+                                    if (std.mem.indexOf(u8, basename, "_elo")) |elo_start| {
+                                        const after_elo = basename[elo_start + 4 ..];
+                                        if (std.mem.indexOf(u8, after_elo, "_s")) |color_sep| {
+                                            resume_elo = std.fmt.parseInt(u16, after_elo[0..color_sep], 10) catch prefs.default_elo;
+                                            const color_part = after_elo[color_sep + 2 ..];
+                                            const color_end = std.mem.indexOf(u8, color_part, ".") orelse color_part.len;
+                                            if (std.mem.eql(u8, color_part[0..color_end], "black")) {
+                                                resume_color = .black;
+                                            }
+                                        }
+                                    }
+                                    menu_action = .resume_game;
+                                    menu_done = true;
+                                }
+                            }
+                        },
                         .render, .none => {},
                     }
                 },
@@ -228,7 +529,16 @@ pub fn main(init: std.process.Init) !void {
             try vx.render(tty.writer());
         }
 
-        const config = menu_state.getConfig();
+        // --- Save preferences if changed ---
+        if (menu_action == .start) {
+            const menu_config = menu_state.getConfig();
+            const menu_color_str = menu_config.player_color.toString();
+            if (menu_config.elo != prefs.default_elo or !std.mem.eql(u8, menu_color_str, prefs.default_color)) {
+                prefs.default_elo = menu_config.elo;
+                prefs.default_color = menu_color_str;
+                config.savePreferences(alloc, io, prefs, config_dir) catch {};
+            }
+        }
 
         // Cleanup previous engine if any
         cancelEngineFuture(&engine_future, io);
@@ -237,20 +547,61 @@ pub fn main(init: std.process.Init) !void {
             current_engine = null;
         }
 
-        // Init engine with selected Elo
-        current_engine = engine_mod.Engine.init(io, stockfish_path, config.elo) catch {
-            continue :main_loop;
-        };
+        var game_state: Game = undefined;
+        var game_elo: u16 = undefined;
+        var player_color: chess.Color = undefined;
+        var current_save_path: ?[]const u8 = null;
+        var game_start_secs: i64 = undefined;
 
-        // Resolve player color (Random → coin flip)
-        const player_color: chess.Color = switch (config.player_color) {
-            .white => .white,
-            .black => .black,
-            .random => if (@mod(Io.Timestamp.now(io, .awake).nanoseconds, 2) == 0) .white else .black,
-        };
+        if (menu_action == .resume_game) {
+            // --- Resume game flow ---
+            const filepath = resume_filepath orelse continue :main_loop;
+            const pgn_content = storage.loadGame(alloc, io, filepath) catch {
+                log.warn("failed to load resume game", .{});
+                continue :main_loop;
+            };
 
-        // Init game with player color and opening book
-        var game_state = Game.initWithColorAndBook(player_color, opening_book);
+            const parsed = pgn.parsePgn(pgn_content) catch {
+                log.warn("failed to parse resume game PGN", .{});
+                continue :main_loop;
+            };
+
+            game_elo = resume_elo;
+            player_color = resume_color;
+            current_save_path = filepath;
+
+            // Reconstruct game by replaying moves
+            game_state = Game.initWithColorAndBook(player_color, opening_book);
+            for (parsed.moves[0..parsed.move_count]) |pm| {
+                game_state.executeMove(pm.move.from, pm.move.to, if (pm.move.move_type == .promotion) pm.move.promotion_piece else null);
+            }
+
+            // Extract date from filename for continued saves
+            game_start_secs = @intCast(@divTrunc(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
+
+            current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
+                continue :main_loop;
+            };
+
+            log.info("resumed game from {s} with {d} moves", .{ filepath, parsed.move_count });
+        } else {
+            // --- New game flow ---
+            const game_config = menu_state.getConfig();
+            game_elo = game_config.elo;
+
+            current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
+                continue :main_loop;
+            };
+
+            player_color = switch (game_config.player_color) {
+                .white => .white,
+                .black => .black,
+                .random => if (@mod(Io.Timestamp.now(io, .awake).nanoseconds, 2) == 0) .white else .black,
+            };
+
+            game_state = Game.initWithColorAndBook(player_color, opening_book);
+            game_start_secs = @intCast(@divTrunc(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
+        }
 
         // If engine goes first (player is black), dispatch immediately
         if (game_state.isEngineTurn()) {
@@ -258,11 +609,197 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // --- Game phase ---
+        var prev_move_count: usize = game_state.move_count;
         renderGame(&vx, &game_state);
         try vx.render(tty.writer());
 
         game_loop: while (true) {
-            // When engine is thinking, poll with timeout for spinner animation
+            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting)
+                loop.tryEvent() catch null
+            else
+                loop.nextEvent() catch null;
+
+            if (event) |ev| {
+                switch (ev) {
+                    .key_press => |key| {
+                        const action = input.handleKeyPress(&game_state, key);
+                        switch (action) {
+                            .quit => {
+                                cancelEngineFuture(&engine_future, io);
+                                return;
+                            },
+                            .new_game => {
+                                cancelEngineFuture(&engine_future, io);
+                                game_state.engine_state = .idle;
+                                continue :main_loop;
+                            },
+                            .resign => {
+                                if (game_state.game_phase == .playing) {
+                                    cancelEngineFuture(&engine_future, io);
+                                    game_state.engine_state = .idle;
+                                    game_state.game_phase = .ended;
+                                    game_state.result = if (game_state.player_color == .white)
+                                        "White resigns \u{2014} Black wins"
+                                    else
+                                        "Black resigns \u{2014} White wins";
+
+                                    autoSave(io, alloc, &game_state, data_dir, &current_save_path, game_elo, player_color, game_start_secs);
+                                    continue :main_loop;
+                                }
+                            },
+                            .render => {
+                                game_state.tickFlash();
+                                game_state.tickEngineHighlight();
+
+                                if (game_state.isEngineTurn() and game_state.engine_state == .idle) {
+                                    dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
+                                }
+                            },
+                            .none => {},
+                        }
+                    },
+                    .engine_move_ready => {
+                        if (engine_future) |*f| {
+                            f.await(io);
+                            engine_future = null;
+                        }
+
+                        if (engine_result.failed) {
+                            game_state.engine_state = .reconnecting;
+                            if (current_engine) |*eng| {
+                                eng.restart(&game_state.board) catch {
+                                    game_state.engine_state = .@"error";
+                                    continue :game_loop;
+                                };
+                                dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop);
+                            }
+                        } else if (engine_result.move) |move| {
+                            game_state.executeMove(move.from, move.to, if (move.move_type == .promotion) move.promotion_piece else null);
+                            game_state.engine_last_move = .{ .from = move.from, .to = move.to };
+                            game_state.engine_last_move_timer = 8;
+                            game_state.engine_state = .idle;
+                        }
+                        engine_result = .{};
+                    },
+                    .winsize => |ws| {
+                        try vx.resize(alloc, tty.writer(), ws);
+                    },
+                    else => {},
+                }
+            }
+
+            // Auto-save after new moves
+            if (game_state.move_count > prev_move_count) {
+                prev_move_count = game_state.move_count;
+                autoSave(io, alloc, &game_state, data_dir, &current_save_path, game_elo, player_color, game_start_secs);
+            }
+
+            // Update thinking timer for display
+            if (game_state.engine_state == .thinking) {
+                const now_ns = Io.Timestamp.now(io, .awake).nanoseconds;
+                const elapsed_ns = now_ns - game_state.thinking_start_ns;
+                const elapsed_s = @divTrunc(elapsed_ns, std.time.ns_per_s);
+                game_state.thinking_elapsed_s = if (elapsed_s >= 0) @intCast(@min(elapsed_s, 9999)) else 0;
+                const spinner_raw = @divTrunc(elapsed_ns, 250 * std.time.ns_per_ms);
+                game_state.spinner_idx = @intCast(@as(u2, @truncate(@as(u64, @intCast(@max(spinner_raw, 0))))));
+            }
+
+            renderGame(&vx, &game_state);
+            try vx.render(tty.writer());
+
+            if (event == null) {
+                io.sleep(Io.Duration.fromMilliseconds(100), .awake) catch {};
+            }
+        }
+    }
+}
+
+fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, tty: *vaxis.Tty, vx: *vaxis.Vaxis) !void {
+    const stockfish_path = engine_mod.findStockfish(io, null) catch {
+        const w = tty.writer();
+        w.writeAll("Error: Stockfish not found. Please install Stockfish:\r\n") catch {};
+        w.writeAll("  Ubuntu/Debian: sudo apt install stockfish\r\n") catch {};
+        w.writeAll("  macOS:         brew install stockfish\r\n") catch {};
+        w.writeAll("  Arch:          sudo pacman -S stockfish\r\n") catch {};
+        return;
+    };
+
+    var loop: vaxis.Loop(Event) = .init(io, tty, vx);
+    try loop.start();
+    defer loop.stop();
+
+    try vx.enterAltScreen(tty.writer());
+    try vx.queryTerminal(tty.writer(), Io.Duration.fromMilliseconds(3000));
+
+    var current_engine: ?engine_mod.Engine = null;
+    defer {
+        if (current_engine) |*eng| eng.deinit();
+    }
+
+    var engine_future: ?Io.Future(void) = null;
+    var engine_result: EngineResult = .{};
+    var engine_board: chess.Board = undefined;
+
+    const opening_book = try alloc.create(openings.OpeningBook);
+    opening_book.* = openings.OpeningBook.init();
+
+    _ = init;
+
+    main_loop: while (true) {
+        var menu_state = Menu{};
+        var menu_done = false;
+
+        while (!menu_done) {
+            const event = try loop.nextEvent();
+            switch (event) {
+                .key_press => |key| {
+                    const action = menu_state.handleInput(key);
+                    switch (action) {
+                        .quit => return,
+                        .start => menu_done = true,
+                        .render, .none, .resume_game, .game_history => {},
+                    }
+                },
+                .winsize => |ws| {
+                    try vx.resize(alloc, tty.writer(), ws);
+                },
+                else => {},
+            }
+
+            const win = vx.window();
+            win.clear();
+            menu_state.render(win);
+            try vx.render(tty.writer());
+        }
+
+        const menu_config = menu_state.getConfig();
+
+        cancelEngineFuture(&engine_future, io);
+        if (current_engine) |*eng| {
+            eng.deinit();
+            current_engine = null;
+        }
+
+        current_engine = engine_mod.Engine.init(io, stockfish_path, menu_config.elo) catch {
+            continue :main_loop;
+        };
+
+        const player_color: chess.Color = switch (menu_config.player_color) {
+            .white => .white,
+            .black => .black,
+            .random => if (@mod(Io.Timestamp.now(io, .awake).nanoseconds, 2) == 0) .white else .black,
+        };
+
+        var game_state = Game.initWithColorAndBook(player_color, opening_book);
+
+        if (game_state.isEngineTurn()) {
+            dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
+        }
+
+        renderGame(vx, &game_state);
+        try vx.render(tty.writer());
+
+        game_loop: while (true) {
             const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting)
                 loop.tryEvent() catch null
             else
@@ -297,7 +834,6 @@ pub fn main(init: std.process.Init) !void {
                                 game_state.tickFlash();
                                 game_state.tickEngineHighlight();
 
-                                // After human move, check if engine should go
                                 if (game_state.isEngineTurn() and game_state.engine_state == .idle) {
                                     dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                                 }
@@ -306,7 +842,6 @@ pub fn main(init: std.process.Init) !void {
                         }
                     },
                     .engine_move_ready => {
-                        // Await the future to clean it up
                         if (engine_future) |*f| {
                             f.await(io);
                             engine_future = null;
@@ -314,13 +849,11 @@ pub fn main(init: std.process.Init) !void {
 
                         if (engine_result.failed) {
                             game_state.engine_state = .reconnecting;
-                            // Try restart
                             if (current_engine) |*eng| {
                                 eng.restart(&game_state.board) catch {
                                     game_state.engine_state = .@"error";
                                     continue :game_loop;
                                 };
-                                // Re-dispatch after restart
                                 dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                             }
                         } else if (engine_result.move) |move| {
@@ -338,7 +871,6 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // Update thinking timer for display
             if (game_state.engine_state == .thinking) {
                 const now_ns = Io.Timestamp.now(io, .awake).nanoseconds;
                 const elapsed_ns = now_ns - game_state.thinking_start_ns;
@@ -348,10 +880,9 @@ pub fn main(init: std.process.Init) !void {
                 game_state.spinner_idx = @intCast(@as(u2, @truncate(@as(u64, @intCast(@max(spinner_raw, 0))))));
             }
 
-            renderGame(&vx, &game_state);
+            renderGame(vx, &game_state);
             try vx.render(tty.writer());
 
-            // When polling (engine thinking), sleep briefly to avoid busy-wait
             if (event == null) {
                 io.sleep(Io.Duration.fromMilliseconds(100), .awake) catch {};
             }
