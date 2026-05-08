@@ -614,6 +614,7 @@ pub fn main(init: std.process.Init) !void {
             current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
                 continue :main_loop;
             };
+            if (current_engine) |*eng| eng.relocate();
 
             log.info("resumed game from {s} with {d} moves", .{ filepath, parsed.move_count });
         } else {
@@ -624,6 +625,7 @@ pub fn main(init: std.process.Init) !void {
             current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
                 continue :main_loop;
             };
+            if (current_engine) |*eng| eng.relocate();
 
             player_color = switch (game_config.player_color) {
                 .white => .white,
@@ -831,6 +833,7 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
         current_engine = engine_mod.Engine.init(io, stockfish_path, menu_config.elo) catch {
             continue :main_loop;
         };
+        if (current_engine) |*eng| eng.relocate();
 
         const player_color: chess.Color = switch (menu_config.player_color) {
             .white => .white,

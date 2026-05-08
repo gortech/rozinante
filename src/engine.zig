@@ -64,6 +64,13 @@ pub const Engine = struct {
         return engine;
     }
 
+    /// Re-point internal reader/writer buffer pointers after the struct has been
+    /// moved in memory (e.g. returned by value from init).
+    pub fn relocate(self: *Engine) void {
+        self.stdin_writer = File.Writer.initStreaming(self.child.stdin.?, self.io, &self.stdin_buf);
+        self.stdout_reader = File.Reader.initStreaming(self.child.stdout.?, self.io, &self.stdout_buf);
+    }
+
     pub fn deinit(self: *Engine) void {
         self.sendCommand("quit") catch {};
         self.stdin_writer.interface.flush() catch {};
