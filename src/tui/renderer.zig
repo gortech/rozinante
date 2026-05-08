@@ -22,6 +22,8 @@ pub const Theme = struct {
     pub const highlight_flash: Color = .{ .rgb = .{ 255, 0, 0 } };
     pub const highlight_promotion: Color = .{ .rgb = .{ 255, 200, 0 } };
     pub const highlight_engine_move: Color = .{ .rgb = .{ 0, 220, 180 } };
+    pub const highlight_endangered: Color = .{ .rgb = .{ 255, 100, 50 } };
+    pub const highlight_hint_best: Color = .{ .rgb = .{ 50, 200, 100 } };
 };
 
 pub const RenderOptions = struct {
@@ -77,6 +79,15 @@ fn squareHighlight(game: *const Game, sq_idx: u6) ?Color {
             if (king_sq.toIndex() == sq_idx)
                 return Theme.highlight_check;
         }
+    }
+
+    if (game.hints_enabled) {
+        if (game.hint_best_move) |bm| {
+            if (bm.from.toIndex() == sq_idx or bm.to.toIndex() == sq_idx)
+                return Theme.highlight_hint_best;
+        }
+        if (game.hint_endangered[sq_idx])
+            return Theme.highlight_endangered;
     }
 
     return null;
@@ -394,7 +405,10 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     const hint_y = win.height -| 2;
     if (hint_y > y) {
         _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        _ = writeStr(win, 1, hint_y + 1, "R Resign N Menu F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        var hint_col = writeStr(win, 1, hint_y + 1, "R Resign N Menu F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        hint_col = writeStr(win, hint_col + 1, hint_y + 1, "H Hints", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        const hint_status: []const u8 = if (game.hints_enabled) " On" else " Off";
+        _ = writeStr(win, hint_col, hint_y + 1, hint_status, .{ .fg = Theme.text_dim, .bg = Theme.bg });
     }
 }
 
@@ -407,4 +421,78 @@ pub fn renderResizeMessage(win: Window) void {
     const hint_x = if (win.width > 27) (win.width - 27) / 2 else 0;
     _ = writeStr(win, msg_x, cy -| 1, msg, .{ .fg = Theme.text_primary, .bg = Theme.bg });
     _ = writeStr(win, hint_x, cy, hint, .{ .fg = Theme.text_dim, .bg = Theme.bg });
+}
+
+const testing = @import("std").testing;
+
+test "squareHighlight: cursor takes priority over endangered hint" {
+    var game = Game.init();
+    game.hints_enabled = true;
+    const sq = game.cursor.toIndex();
+    game.hint_endangered[sq] = true;
+
+    const color = squareHighlight(&game, sq);
+    try testing.expect(color != null);
+    try testing.expectEqual(Theme.highlight_cursor, color.?);
+}
+
+test "squareHighlight: check takes priority over endangered hint" {
+    var game = Game.init();
+    // Set up a check position: white king on e1, black rook on e8
+    game.board = chess.Board.empty();
+    const wk_sq = chess.Square.init(.e, .@"1");
+    const bk_sq = chess.Square.init(.h, .@"8");
+    const br_sq = chess.Square.init(.e, .@"8");
+    game.board.squares[wk_sq.toIndex()] = chess.Piece.init(.white, .king);
+    game.board.squares[bk_sq.toIndex()] = chess.Piece.init(.black, .king);
+    game.board.squares[br_sq.toIndex()] = chess.Piece.init(.black, .rook);
+    game.board.active_color = .white;
+
+    game.hints_enabled = true;
+    game.hint_endangered[wk_sq.toIndex()] = true;
+    // Move cursor away so it doesn't interfere
+    game.cursor = chess.Square.init(.a, .@"1");
+
+    const color = squareHighlight(&game, wk_sq.toIndex());
+    try testing.expect(color != null);
+    try testing.expectEqual(Theme.highlight_check, color.?);
+}
+
+test "squareHighlight: endangered hint shown when no higher priority" {
+    var game = Game.init();
+    game.hints_enabled = true;
+    // Pick a square that's not the cursor
+    const sq = chess.Square.init(.a, .@"8");
+    game.hint_endangered[sq.toIndex()] = true;
+    // Cursor is at e2 by default, not a8
+
+    const color = squareHighlight(&game, sq.toIndex());
+    try testing.expect(color != null);
+    try testing.expectEqual(Theme.highlight_endangered, color.?);
+}
+
+test "squareHighlight: best move hint shown when enabled" {
+    var game = Game.init();
+    game.hints_enabled = true;
+    const from_sq = chess.Square.init(.a, .@"8");
+    const to_sq = chess.Square.init(.a, .@"7");
+    game.hint_best_move = .{ .from = from_sq, .to = to_sq };
+
+    const color_from = squareHighlight(&game, from_sq.toIndex());
+    try testing.expect(color_from != null);
+    try testing.expectEqual(Theme.highlight_hint_best, color_from.?);
+
+    const color_to = squareHighlight(&game, to_sq.toIndex());
+    try testing.expect(color_to != null);
+    try testing.expectEqual(Theme.highlight_hint_best, color_to.?);
+}
+
+test "squareHighlight: hints not shown when disabled" {
+    var game = Game.init();
+    game.hints_enabled = false;
+    const sq = chess.Square.init(.a, .@"8");
+    game.hint_endangered[sq.toIndex()] = true;
+
+    const color = squareHighlight(&game, sq.toIndex());
+    try testing.expect(color == null);
 }

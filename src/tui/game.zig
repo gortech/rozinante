@@ -194,6 +194,9 @@ pub const Game = struct {
     current_opening: ?openings.Opening,
     opening_is_current: bool,
     resign_pending: bool,
+    hints_enabled: bool,
+    hint_endangered: [64]bool,
+    hint_best_move: ?LastMove,
 
     pub fn init() Game {
         return initWithColor(.white);
@@ -233,7 +236,32 @@ pub const Game = struct {
             .current_opening = null,
             .opening_is_current = true,
             .resign_pending = false,
+            .hints_enabled = false,
+            .hint_endangered = [_]bool{false} ** 64,
+            .hint_best_move = null,
         };
+    }
+
+    pub fn clearHints(self: *Game) void {
+        self.hint_endangered = [_]bool{false} ** 64;
+        self.hint_best_move = null;
+    }
+
+    pub fn computeEndangered(self: *Game) void {
+        self.hint_endangered = [_]bool{false} ** 64;
+        const friendly_color = self.board.active_color;
+        const opponent_color = friendly_color.opponent();
+        for (0..64) |i| {
+            const piece = self.board.squares[i];
+            if (piece.color()) |c| {
+                if (c == friendly_color) {
+                    const sq = chess.Square.fromIndex(@intCast(i));
+                    if (chess.isSquareAttacked(&self.board, sq, opponent_color)) {
+                        self.hint_endangered[i] = true;
+                    }
+                }
+            }
+        }
     }
 
     pub fn selectSquare(self: *Game) void {
@@ -294,6 +322,7 @@ pub const Game = struct {
     }
 
     pub fn executeMove(self: *Game, from: chess.Square, to: chess.Square, promotion: ?chess.PieceType) void {
+        self.clearHints();
         const legal = chess.legalMoves(&self.board);
         var matching_move: ?chess.Move = null;
 
@@ -539,4 +568,98 @@ pub const Game = struct {
         }
         return null;
     }
+
+    pub fn isHumanTurn(self: *const Game) bool {
+        if (self.game_phase != .playing) return false;
+        return switch (self.board.active_color) {
+            .white => self.white_opponent == .human,
+            .black => self.black_opponent == .human,
+        };
+    }
 };
+
+const testing = @import("std").testing;
+
+test "clearHints zeroes all hint state" {
+    var game = Game.init();
+    game.hints_enabled = true;
+    game.hint_endangered[0] = true;
+    game.hint_endangered[63] = true;
+    game.hint_best_move = .{ .from = chess.Square.init(.e, .@"2"), .to = chess.Square.init(.e, .@"4") };
+
+    game.clearHints();
+
+    for (0..64) |i| {
+        try testing.expect(!game.hint_endangered[i]);
+    }
+    try testing.expect(game.hint_best_move == null);
+}
+
+test "computeEndangered marks attacked pieces on initial board" {
+    var game = Game.init();
+    game.hints_enabled = true;
+    game.computeEndangered();
+
+    // On the initial board with white to move, none of white's pieces are attacked
+    // by black (black pawns on rank 7 don't attack rank 1 or 2)
+    for (0..16) |i| {
+        try testing.expect(!game.hint_endangered[i]);
+    }
+}
+
+test "computeEndangered detects piece attacked by opponent" {
+    var game = Game.init();
+    // Set up a board: white king on e1, white pawn on d4, black pawn on e5
+    game.board = chess.Board.empty();
+    const wk_sq = chess.Square.init(.e, .@"1");
+    const wp_sq = chess.Square.init(.d, .@"4");
+    const bp_sq = chess.Square.init(.e, .@"5");
+    game.board.squares[wk_sq.toIndex()] = chess.Piece.init(.white, .king);
+    game.board.squares[wp_sq.toIndex()] = chess.Piece.init(.white, .pawn);
+    game.board.squares[bp_sq.toIndex()] = chess.Piece.init(.black, .pawn);
+    // Add black king so the position is valid
+    const bk_sq = chess.Square.init(.h, .@"8");
+    game.board.squares[bk_sq.toIndex()] = chess.Piece.init(.black, .king);
+    game.board.active_color = .white;
+
+    game.hints_enabled = true;
+    game.computeEndangered();
+
+    // d4 pawn is attacked diagonally by e5 pawn
+    try testing.expect(game.hint_endangered[wp_sq.toIndex()]);
+    // King on e1 is not attacked
+    try testing.expect(!game.hint_endangered[wk_sq.toIndex()]);
+}
+
+test "computeEndangered empty board has no endangered pieces" {
+    var game = Game.init();
+    game.board = chess.Board.empty();
+    // Just two kings
+    const wk_sq = chess.Square.init(.a, .@"1");
+    const bk_sq = chess.Square.init(.h, .@"8");
+    game.board.squares[wk_sq.toIndex()] = chess.Piece.init(.white, .king);
+    game.board.squares[bk_sq.toIndex()] = chess.Piece.init(.black, .king);
+    game.board.active_color = .white;
+
+    game.hints_enabled = true;
+    game.computeEndangered();
+
+    for (0..64) |i| {
+        try testing.expect(!game.hint_endangered[i]);
+    }
+}
+
+test "executeMove clears hints" {
+    var game = Game.init();
+    game.hints_enabled = true;
+    game.hint_endangered[0] = true;
+    game.hint_best_move = .{ .from = chess.Square.init(.e, .@"2"), .to = chess.Square.init(.e, .@"4") };
+
+    // Execute e2-e4
+    game.executeMove(chess.Square.init(.e, .@"2"), chess.Square.init(.e, .@"4"), null);
+
+    for (0..64) |i| {
+        try testing.expect(!game.hint_endangered[i]);
+    }
+    try testing.expect(game.hint_best_move == null);
+}

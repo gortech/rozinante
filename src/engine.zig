@@ -203,6 +203,12 @@ pub const Engine = struct {
         try self.waitReady();
     }
 
+    pub fn stop(self: *Engine) void {
+        self.sendCommand("stop") catch |err| {
+            log.warn("failed to send stop command: {}", .{err});
+        };
+    }
+
     pub fn restart(self: *Engine, board: *const Board) !void {
         log.info("restarting engine", .{});
 

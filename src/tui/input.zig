@@ -8,6 +8,7 @@ pub const Action = enum {
     none,
     resign,
     new_game,
+    toggle_hints,
 };
 
 pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
@@ -98,6 +99,7 @@ pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
         game.flipBoard();
         return .render;
     }
+    if (key.matches('h', .{})) return .toggle_hints;
 
     return .none;
 }

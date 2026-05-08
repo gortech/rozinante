@@ -20,6 +20,7 @@ const config = persistence.config;
 const Io = std.Io;
 
 const log = std.log.scoped(.persistence);
+const hints_log = std.log.scoped(.hints);
 const linux = std.os.linux;
 
 pub const std_options: std.Options = .{
@@ -94,10 +95,16 @@ const Event = union(enum) {
     cap_color_scheme_updates,
     cap_multi_cursor,
     engine_move_ready,
+    engine_analysis_ready,
 };
 
 const EngineResult = struct {
     move: ?chess.Move = null,
+    failed: bool = false,
+};
+
+const AnalysisResult = struct {
+    best_move: ?chess.Move = null,
     failed: bool = false,
 };
 
@@ -108,6 +115,25 @@ fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Engin
         result.failed = true;
     }
     event_loop.postEvent(.engine_move_ready) catch {};
+}
+
+fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *AnalysisResult, event_loop: *vaxis.Loop(Event)) void {
+    hints_log.debug("background analysis started", .{});
+    const analysis = eng.analyze(board, 500) catch {
+        hints_log.warn("background analysis failed", .{});
+        result.failed = true;
+        event_loop.postEvent(.engine_analysis_ready) catch {};
+        return;
+    };
+    result.best_move = analysis.best_move;
+    if (analysis.best_move) |m| {
+        var buf: [5]u8 = undefined;
+        const uci = m.toUci(&buf);
+        hints_log.debug("analysis result: best_move={s}", .{uci});
+    } else {
+        hints_log.debug("analysis result: no best move", .{});
+    }
+    event_loop.postEvent(.engine_analysis_ready) catch {};
 }
 
 const MIN_W: u16 = 94;
@@ -150,6 +176,53 @@ fn cancelEngineFuture(engine_future: *?Io.Future(void), io: Io) void {
         _ = f.cancel(io);
         engine_future.* = null;
     }
+}
+
+fn dispatchAnalysis(
+    io: Io,
+    eng: *engine_mod.Engine,
+    game_state: *const Game,
+    analysis_board: *chess.Board,
+    analysis_result: *AnalysisResult,
+    analysis_future: *?Io.Future(void),
+    analysis_pending: *bool,
+    loop_ptr: *vaxis.Loop(Event),
+) void {
+    if (analysis_pending.*) return;
+    if (!game_state.hints_enabled) return;
+    if (!game_state.isHumanTurn()) return;
+
+    analysis_board.* = game_state.board;
+    analysis_result.* = .{};
+    analysis_pending.* = true;
+    hints_log.debug("dispatching background analysis", .{});
+
+    analysis_future.* = io.concurrent(analysisWork, .{
+        eng,
+        analysis_board,
+        analysis_result,
+        loop_ptr,
+    }) catch {
+        hints_log.warn("failed to dispatch analysis concurrent task", .{});
+        analysis_pending.* = false;
+        return;
+    };
+}
+
+fn cancelAnalysis(
+    io: Io,
+    eng: *engine_mod.Engine,
+    analysis_future: *?Io.Future(void),
+    analysis_pending: *bool,
+) void {
+    if (!analysis_pending.*) return;
+    hints_log.debug("cancelling background analysis", .{});
+    eng.stop();
+    if (analysis_future.*) |*f| {
+        f.await(io);
+        analysis_future.* = null;
+    }
+    analysis_pending.* = false;
 }
 
 fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
@@ -466,6 +539,11 @@ pub fn main(init: std.process.Init) !void {
     var engine_result: EngineResult = .{};
     var engine_board: chess.Board = undefined;
 
+    var analysis_future: ?Io.Future(void) = null;
+    var analysis_result: AnalysisResult = .{};
+    var analysis_board: chess.Board = undefined;
+    var analysis_pending: bool = false;
+
     const opening_book = try alloc.create(openings.OpeningBook);
     opening_book.* = openings.OpeningBook.init();
 
@@ -573,6 +651,9 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // Cleanup previous engine if any
+        if (current_engine) |*eng| {
+            cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+        }
         cancelEngineFuture(&engine_future, io);
         if (current_engine) |*eng| {
             eng.deinit();
@@ -651,7 +732,7 @@ pub fn main(init: std.process.Init) !void {
         try vx.render(tty.writer());
 
         game_loop: while (true) {
-            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting)
+            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting or analysis_pending)
                 loop.tryEvent() catch null
             else
                 loop.nextEvent() catch null;
@@ -666,16 +747,25 @@ pub fn main(init: std.process.Init) !void {
                         }
                         switch (action) {
                             .quit => {
+                                if (current_engine) |*eng| {
+                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                }
                                 cancelEngineFuture(&engine_future, io);
                                 return;
                             },
                             .new_game => {
+                                if (current_engine) |*eng| {
+                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                }
                                 cancelEngineFuture(&engine_future, io);
                                 game_state.engine_state = .idle;
                                 continue :main_loop;
                             },
                             .resign => {
                                 if (game_state.game_phase == .playing) {
+                                    if (current_engine) |*eng| {
+                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                    }
                                     cancelEngineFuture(&engine_future, io);
                                     game_state.engine_state = .idle;
                                     game_state.game_phase = .ended;
@@ -688,11 +778,28 @@ pub fn main(init: std.process.Init) !void {
                                     continue :main_loop;
                                 }
                             },
+                            .toggle_hints => {
+                                game_state.hints_enabled = !game_state.hints_enabled;
+                                if (game_state.hints_enabled) {
+                                    game_state.computeEndangered();
+                                    if (current_engine) |*eng| {
+                                        dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
+                                    }
+                                } else {
+                                    if (current_engine) |*eng| {
+                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                    }
+                                    game_state.clearHints();
+                                }
+                            },
                             .render => {
                                 game_state.tickFlash();
                                 game_state.tickEngineHighlight();
 
                                 if (game_state.isEngineTurn() and game_state.engine_state == .idle) {
+                                    if (current_engine) |*eng| {
+                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                    }
                                     log.debug("dispatching engine move (engine turn, idle)", .{});
                                     dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                                 }
@@ -726,8 +833,35 @@ pub fn main(init: std.process.Init) !void {
                             game_state.engine_last_move_timer = 8;
                             game_state.engine_state = .idle;
                             log.debug("engine move applied, move_count now {d}", .{game_state.move_count});
+
+                            if (game_state.hints_enabled and game_state.isHumanTurn()) {
+                                game_state.computeEndangered();
+                                if (current_engine) |*eng| {
+                                    dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
+                                }
+                            }
                         }
                         engine_result = .{};
+                    },
+                    .engine_analysis_ready => {
+                        if (analysis_future) |*f| {
+                            f.await(io);
+                            analysis_future = null;
+                        }
+                        if (analysis_pending) {
+                            analysis_pending = false;
+                            if (!analysis_result.failed) {
+                                if (analysis_result.best_move) |move| {
+                                    game_state.hint_best_move = .{ .from = move.from, .to = move.to };
+                                    var uci_buf: [5]u8 = undefined;
+                                    const uci = move.toUci(&uci_buf);
+                                    hints_log.debug("best move hint set: {s}", .{uci});
+                                }
+                            } else {
+                                hints_log.warn("analysis result: failed", .{});
+                            }
+                        }
+                        analysis_result = .{};
                     },
                     .winsize => |ws| {
                         try vx.resize(alloc, tty.writer(), ws);
@@ -790,6 +924,11 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
     var engine_result: EngineResult = .{};
     var engine_board: chess.Board = undefined;
 
+    var analysis_future: ?Io.Future(void) = null;
+    var analysis_result: AnalysisResult = .{};
+    var analysis_board: chess.Board = undefined;
+    var analysis_pending: bool = false;
+
     const opening_book = try alloc.create(openings.OpeningBook);
     opening_book.* = openings.OpeningBook.init();
 
@@ -824,6 +963,9 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
 
         const menu_config = menu_state.getConfig();
 
+        if (current_engine) |*eng| {
+            cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+        }
         cancelEngineFuture(&engine_future, io);
         if (current_engine) |*eng| {
             eng.deinit();
@@ -851,7 +993,7 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
         try vx.render(tty.writer());
 
         game_loop: while (true) {
-            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting)
+            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting or analysis_pending)
                 loop.tryEvent() catch null
             else
                 loop.nextEvent() catch null;
@@ -862,16 +1004,25 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
                         const action = input.handleKeyPress(&game_state, key);
                         switch (action) {
                             .quit => {
+                                if (current_engine) |*eng| {
+                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                }
                                 cancelEngineFuture(&engine_future, io);
                                 return;
                             },
                             .new_game => {
+                                if (current_engine) |*eng| {
+                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                }
                                 cancelEngineFuture(&engine_future, io);
                                 game_state.engine_state = .idle;
                                 continue :main_loop;
                             },
                             .resign => {
                                 if (game_state.game_phase == .playing) {
+                                    if (current_engine) |*eng| {
+                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                    }
                                     cancelEngineFuture(&engine_future, io);
                                     game_state.engine_state = .idle;
                                     game_state.game_phase = .ended;
@@ -881,11 +1032,28 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
                                         "Black resigns \u{2014} White wins";
                                 }
                             },
+                            .toggle_hints => {
+                                game_state.hints_enabled = !game_state.hints_enabled;
+                                if (game_state.hints_enabled) {
+                                    game_state.computeEndangered();
+                                    if (current_engine) |*eng| {
+                                        dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
+                                    }
+                                } else {
+                                    if (current_engine) |*eng| {
+                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                    }
+                                    game_state.clearHints();
+                                }
+                            },
                             .render => {
                                 game_state.tickFlash();
                                 game_state.tickEngineHighlight();
 
                                 if (game_state.isEngineTurn() and game_state.engine_state == .idle) {
+                                    if (current_engine) |*eng| {
+                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                    }
                                     dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                                 }
                             },
@@ -912,8 +1080,35 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
                             game_state.engine_last_move = .{ .from = move.from, .to = move.to };
                             game_state.engine_last_move_timer = 8;
                             game_state.engine_state = .idle;
+
+                            if (game_state.hints_enabled and game_state.isHumanTurn()) {
+                                game_state.computeEndangered();
+                                if (current_engine) |*eng| {
+                                    dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
+                                }
+                            }
                         }
                         engine_result = .{};
+                    },
+                    .engine_analysis_ready => {
+                        if (analysis_future) |*f| {
+                            f.await(io);
+                            analysis_future = null;
+                        }
+                        if (analysis_pending) {
+                            analysis_pending = false;
+                            if (!analysis_result.failed) {
+                                if (analysis_result.best_move) |move| {
+                                    game_state.hint_best_move = .{ .from = move.from, .to = move.to };
+                                    var uci_buf: [5]u8 = undefined;
+                                    const uci = move.toUci(&uci_buf);
+                                    hints_log.debug("best move hint set: {s}", .{uci});
+                                }
+                            } else {
+                                hints_log.warn("analysis result: failed", .{});
+                            }
+                        }
+                        analysis_result = .{};
                     },
                     .winsize => |ws| {
                         try vx.resize(alloc, tty.writer(), ws);
