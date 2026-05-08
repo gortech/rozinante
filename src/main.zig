@@ -889,3 +889,61 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
         }
     }
 }
+
+test "autoSave integration: first move e4" {
+    const test_io = std.Io.Threaded.global_single_threaded.io();
+    const alloc = std.testing.allocator;
+
+    var game_state = Game.initWithColorAndBook(.white, null);
+    game_state.executeMove(
+        chess.Square.init(.e, .@"2"),
+        chess.Square.init(.e, .@"4"),
+        null,
+    );
+
+    if (game_state.board_count < 512) {
+        game_state.board_history[game_state.board_count] = game_state.board;
+    }
+
+    var date_buf: [16]u8 = undefined;
+    const pgn_date = formatPgnDate(&date_buf, 1746665000);
+
+    const header = pgn.PgnHeader{
+        .event = "Rozinante",
+        .site = "Local",
+        .date = pgn_date,
+        .white = "Player",
+        .black = "Stockfish",
+        .result = "*",
+    };
+
+    var pgn_buf: [32768]u8 = undefined;
+    const pgn_content = try pgn.writePgn(
+        &pgn_buf,
+        header,
+        game_state.move_history[0..game_state.move_count],
+        game_state.board_history[0 .. game_state.board_count + 1],
+    );
+
+    try std.testing.expect(pgn_content.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, pgn_content, "1. e4 *") != null);
+
+    const data_dir = "/tmp/rozinante_test_autosave";
+    storage.ensureDirExists(test_io, data_dir) catch {};
+    defer {
+        var dir = std.Io.Dir.openDirAbsolute(test_io, data_dir, .{ .iterate = true }) catch @as(std.Io.Dir, undefined);
+        dir.close(test_io);
+    }
+
+    const path = try storage.saveGame(alloc, test_io, data_dir, .{
+        .pgn_content = pgn_content,
+        .date_secs = 1746665000,
+        .elo = 1200,
+        .color = "white",
+    });
+    defer alloc.free(path);
+
+    const loaded = try storage.loadGame(alloc, test_io, path);
+    defer alloc.free(loaded);
+    try std.testing.expect(std.mem.indexOf(u8, loaded, "1. e4 *") != null);
+}
