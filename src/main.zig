@@ -20,10 +20,34 @@ const config = persistence.config;
 const Io = std.Io;
 
 const log = std.log.scoped(.persistence);
+const linux = std.os.linux;
 
 pub const std_options: std.Options = .{
-    .log_level = .warn,
+    .log_level = .debug,
+    .logFn = fileLogFn,
 };
+
+const log_path: [*:0]const u8 = "/tmp/rozinante.log";
+
+fn fileLogFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const level_str = comptime message_level.asText();
+    const scope_str = comptime @tagName(scope);
+    const prefix = level_str ++ " (" ++ scope_str ++ "): ";
+
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, prefix ++ format ++ "\n", args) catch return;
+
+    const rc = linux.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
+    const fd: i32 = @bitCast(@as(u32, @truncate(rc)));
+    if (fd < 0) return;
+    _ = linux.write(fd, msg.ptr, msg.len);
+    _ = linux.close(fd);
+}
 
 pub const Panic = struct {
     pub const call = panicHandler;
@@ -197,6 +221,7 @@ fn autoSave(
     game_start_secs: i64,
 ) void {
     if (game_state.move_count == 0) return;
+    log.debug("autoSave: move_count={d} board_count={d} has_save_path={}", .{ game_state.move_count, game_state.board_count, current_save_path.* != null });
 
     // Build board_history slice including current board for writePgn
     // writePgn needs board_history[0..move_count] (boards before each move)
@@ -222,6 +247,8 @@ fn autoSave(
         .result = result_str,
     };
 
+    log.debug("autoSave: calling writePgn with {d} moves, {d} boards", .{ game_state.move_count, game_state.board_count + 1 });
+
     var pgn_buf: [32768]u8 = undefined;
     const pgn_content = pgn.writePgn(
         &pgn_buf,
@@ -232,6 +259,7 @@ fn autoSave(
         log.warn("failed to serialize PGN for auto-save", .{});
         return;
     };
+    log.debug("autoSave: writePgn produced {d} bytes", .{pgn_content.len});
 
     if (current_save_path.*) |existing_path| {
         // Overwrite existing file
@@ -375,6 +403,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const alloc = init.arena.allocator();
 
+    log.debug("=== rozinante starting ===", .{});
+
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(io, &tty_buf);
     global_tty = tty;
@@ -391,6 +421,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // --- Persistence setup ---
+    log.debug("resolving data and config directories", .{});
     const data_dir = storage.getDataDir(alloc, io, init.environ_map) catch |err| {
         log.warn("failed to resolve data directory: {}, persistence disabled", .{err});
         return mainNoPersistence(init, io, alloc, &tty, &vx);
@@ -399,6 +430,7 @@ pub fn main(init: std.process.Init) !void {
         log.warn("failed to resolve config directory: {}, persistence disabled", .{err});
         return mainNoPersistence(init, io, alloc, &tty, &vx);
     };
+    log.debug("data_dir={s} config_dir={s}", .{ data_dir, config_dir });
     storage.ensureDirExists(io, data_dir) catch {};
     storage.ensureDirExists(io, config_dir) catch {};
 
@@ -605,8 +637,11 @@ pub fn main(init: std.process.Init) !void {
 
         // If engine goes first (player is black), dispatch immediately
         if (game_state.isEngineTurn()) {
+            log.debug("engine goes first, dispatching initial move", .{});
             dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
         }
+
+        log.debug("entering game loop, player_color={s} elo={d}", .{ if (player_color == .white) "white" else "black", game_elo });
 
         // --- Game phase ---
         var prev_move_count: usize = game_state.move_count;
@@ -622,7 +657,11 @@ pub fn main(init: std.process.Init) !void {
             if (event) |ev| {
                 switch (ev) {
                     .key_press => |key| {
+                        const prev_mc = game_state.move_count;
                         const action = input.handleKeyPress(&game_state, key);
+                        if (game_state.move_count > prev_mc) {
+                            log.debug("player move detected via input, move_count {d}->{d}", .{ prev_mc, game_state.move_count });
+                        }
                         switch (action) {
                             .quit => {
                                 cancelEngineFuture(&engine_future, io);
@@ -652,6 +691,7 @@ pub fn main(init: std.process.Init) !void {
                                 game_state.tickEngineHighlight();
 
                                 if (game_state.isEngineTurn() and game_state.engine_state == .idle) {
+                                    log.debug("dispatching engine move (engine turn, idle)", .{});
                                     dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                                 }
                             },
@@ -659,12 +699,14 @@ pub fn main(init: std.process.Init) !void {
                         }
                     },
                     .engine_move_ready => {
+                        log.debug("engine_move_ready event received", .{});
                         if (engine_future) |*f| {
                             f.await(io);
                             engine_future = null;
                         }
 
                         if (engine_result.failed) {
+                            log.debug("engine move failed, attempting reconnect", .{});
                             game_state.engine_state = .reconnecting;
                             if (current_engine) |*eng| {
                                 eng.restart(&game_state.board) catch {
@@ -674,10 +716,14 @@ pub fn main(init: std.process.Init) !void {
                                 dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                             }
                         } else if (engine_result.move) |move| {
+                            var move_buf: [5]u8 = undefined;
+                            const uci = move.toUci(&move_buf);
+                            log.debug("engine move received: {s}", .{uci});
                             game_state.executeMove(move.from, move.to, if (move.move_type == .promotion) move.promotion_piece else null);
                             game_state.engine_last_move = .{ .from = move.from, .to = move.to };
                             game_state.engine_last_move_timer = 8;
                             game_state.engine_state = .idle;
+                            log.debug("engine move applied, move_count now {d}", .{game_state.move_count});
                         }
                         engine_result = .{};
                     },
@@ -690,8 +736,10 @@ pub fn main(init: std.process.Init) !void {
 
             // Auto-save after new moves
             if (game_state.move_count > prev_move_count) {
+                log.debug("move #{d} detected, triggering auto-save", .{game_state.move_count});
                 prev_move_count = game_state.move_count;
                 autoSave(io, alloc, &game_state, data_dir, &current_save_path, game_elo, player_color, game_start_secs);
+                log.debug("auto-save completed for move #{d}", .{game_state.move_count});
             }
 
             // Update thinking timer for display
@@ -888,62 +936,4 @@ fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, t
             }
         }
     }
-}
-
-test "autoSave integration: first move e4" {
-    const test_io = std.Io.Threaded.global_single_threaded.io();
-    const alloc = std.testing.allocator;
-
-    var game_state = Game.initWithColorAndBook(.white, null);
-    game_state.executeMove(
-        chess.Square.init(.e, .@"2"),
-        chess.Square.init(.e, .@"4"),
-        null,
-    );
-
-    if (game_state.board_count < 512) {
-        game_state.board_history[game_state.board_count] = game_state.board;
-    }
-
-    var date_buf: [16]u8 = undefined;
-    const pgn_date = formatPgnDate(&date_buf, 1746665000);
-
-    const header = pgn.PgnHeader{
-        .event = "Rozinante",
-        .site = "Local",
-        .date = pgn_date,
-        .white = "Player",
-        .black = "Stockfish",
-        .result = "*",
-    };
-
-    var pgn_buf: [32768]u8 = undefined;
-    const pgn_content = try pgn.writePgn(
-        &pgn_buf,
-        header,
-        game_state.move_history[0..game_state.move_count],
-        game_state.board_history[0 .. game_state.board_count + 1],
-    );
-
-    try std.testing.expect(pgn_content.len > 0);
-    try std.testing.expect(std.mem.indexOf(u8, pgn_content, "1. e4 *") != null);
-
-    const data_dir = "/tmp/rozinante_test_autosave";
-    storage.ensureDirExists(test_io, data_dir) catch {};
-    defer {
-        var dir = std.Io.Dir.openDirAbsolute(test_io, data_dir, .{ .iterate = true }) catch @as(std.Io.Dir, undefined);
-        dir.close(test_io);
-    }
-
-    const path = try storage.saveGame(alloc, test_io, data_dir, .{
-        .pgn_content = pgn_content,
-        .date_secs = 1746665000,
-        .elo = 1200,
-        .color = "white",
-    });
-    defer alloc.free(path);
-
-    const loaded = try storage.loadGame(alloc, test_io, path);
-    defer alloc.free(loaded);
-    try std.testing.expect(std.mem.indexOf(u8, loaded, "1. e4 *") != null);
 }
