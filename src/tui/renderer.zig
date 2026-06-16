@@ -93,10 +93,6 @@ fn squareHighlight(game: *const Game, sq_idx: u6) ?Color {
     return null;
 }
 
-fn resolveSquareColor(game: *const Game, sq_idx: u6, display_col: u3, display_row: u3) Color {
-    return squareHighlight(game, sq_idx) orelse baseSquareColor(display_col, display_row);
-}
-
 pub fn boardWidth(opts: RenderOptions) u16 {
     const label = if (opts.show_labels) opts.label_w else 0;
     return label + 8 * opts.cell_w;
@@ -107,30 +103,12 @@ pub fn boardHeight(opts: RenderOptions) u16 {
     return label + 8 * opts.cell_h;
 }
 
-fn pieceToUnicode(p: chess.Piece) ?[]const u8 {
-    return switch (p) {
-        .white_king => "\u{2654}",
-        .white_queen => "\u{2655}",
-        .white_rook => "\u{2656}",
-        .white_bishop => "\u{2657}",
-        .white_knight => "\u{2658}",
-        .white_pawn => "\u{2659}",
-        .black_king => "\u{265A}",
-        .black_queen => "\u{265B}",
-        .black_rook => "\u{265C}",
-        .black_bishop => "\u{265D}",
-        .black_knight => "\u{265E}",
-        .black_pawn => "\u{265F}",
-        .empty => null,
-    };
-}
-
 const rank_labels = [_][]const u8{ "8", "7", "6", "5", "4", "3", "2", "1" };
 const rank_labels_flipped = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8" };
 const file_labels = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
 const file_labels_flipped = [_][]const u8{ "h", "g", "f", "e", "d", "c", "b", "a" };
 
-pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
+pub fn renderBoardCore(win: Window, board: *const chess.Board, opts: RenderOptions, flipped: bool, highlight: ?*const Game) void {
     const x_origin: u16 = if (opts.show_labels) opts.label_w else 0;
     const use_sprites = opts.cell_w >= 5 and opts.cell_h >= 4;
 
@@ -139,7 +117,7 @@ pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
         const ry: u16 = @as(u16, display_row) * opts.cell_h;
 
         if (opts.show_labels) {
-            const labels = if (game.flipped) rank_labels_flipped else rank_labels;
+            const labels = if (flipped) rank_labels_flipped else rank_labels;
             win.writeCell(0, ry + opts.cell_h / 2, .{
                 .char = .{ .grapheme = labels[dr], .width = 1 },
                 .style = .{ .fg = Theme.text_dim, .bg = Theme.bg },
@@ -148,9 +126,12 @@ pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
 
         for (0..8) |dc| {
             const display_col: u3 = @intCast(dc);
-            const sq_idx = boardSquare(display_row, display_col, game.flipped);
-            const piece = game.board.squares[sq_idx];
-            const bg = resolveSquareColor(game, sq_idx, display_col, display_row);
+            const sq_idx = boardSquare(display_row, display_col, flipped);
+            const piece = board.squares[sq_idx];
+            const file: u3 = @intCast(sq_idx % 8);
+            const rank: u3 = @intCast(sq_idx / 8);
+            const base = baseSquareColor(file, rank);
+            const bg = if (highlight) |g| (squareHighlight(g, sq_idx) orelse base) else base;
 
             const cx: u16 = x_origin + @as(u16, display_col) * opts.cell_w;
 
@@ -172,7 +153,8 @@ pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
                         sprites.stamp(win, sprites.forPieceType(pt), cx, ry, opts.cell_w, opts.cell_h, fg, bg);
                     }
                 } else {
-                    if (pieceToUnicode(piece)) |sym| {
+                    if (piece.pieceType()) |pt| {
+                        const sym = game_mod.pieceSymbol(pt, piece.color() orelse continue);
                         const px = cx + opts.cell_w / 2;
                         const py = ry + opts.cell_h / 2;
                         win.writeCell(px, py, .{
@@ -186,7 +168,7 @@ pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
     }
 
     if (opts.show_labels) {
-        const f_labels = if (game.flipped) file_labels_flipped else file_labels;
+        const f_labels = if (flipped) file_labels_flipped else file_labels;
         for (0..8) |dc| {
             const cx: u16 = x_origin + @as(u16, @intCast(dc)) * opts.cell_w + opts.cell_w / 2;
             const fy: u16 = 8 * opts.cell_h;
@@ -196,6 +178,10 @@ pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
             });
         }
     }
+}
+
+pub fn renderBoard(win: Window, game: *const Game, opts: RenderOptions) void {
+    renderBoardCore(win, &game.board, opts, game.flipped, game);
 }
 
 // --- Text rendering helpers ---

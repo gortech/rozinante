@@ -75,17 +75,6 @@ pub fn savePreferences(allocator: Allocator, io: Io, prefs: Preferences, config_
     };
 }
 
-pub fn freePreferences(allocator: Allocator, prefs: *Preferences) void {
-    if (prefs.stockfish_path) |p| {
-        allocator.free(p);
-        prefs.stockfish_path = null;
-    }
-    if (!std.mem.eql(u8, prefs.default_color, "white")) {
-        allocator.free(prefs.default_color);
-        prefs.default_color = "white";
-    }
-}
-
 const JsonPreferences = struct {
     stockfish_path: ?[]const u8 = null,
     default_elo: u16 = 1200,
@@ -100,7 +89,9 @@ fn getTestIo() Io {
 }
 
 test "preferences round-trip" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const io = getTestIo();
 
     const tmp_dir = "/tmp/rozinante-test-config";
@@ -119,8 +110,7 @@ test "preferences round-trip" {
 
     try savePreferences(allocator, io, prefs, tmp_dir);
 
-    var loaded = loadPreferences(allocator, io, tmp_dir);
-    defer freePreferences(allocator, &loaded);
+    const loaded = loadPreferences(allocator, io, tmp_dir);
 
     try std.testing.expectEqual(@as(u16, 1500), loaded.default_elo);
     try std.testing.expectEqualStrings("black", loaded.default_color);

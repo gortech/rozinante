@@ -198,11 +198,6 @@ pub const Engine = struct {
         return EngineError.EngineTimeout;
     }
 
-    pub fn newGame(self: *Engine) !void {
-        try self.sendCommand("ucinewgame");
-        try self.waitReady();
-    }
-
     pub fn stop(self: *Engine) void {
         self.sendCommand("stop") catch |err| {
             log.warn("failed to send stop command: {}", .{err});
@@ -325,7 +320,6 @@ pub fn eloToMovetime(elo: u16) u16 {
     return 12000;
 }
 
-
 // --- Tests ---
 
 test "parseBestMove: standard move" {
@@ -414,7 +408,6 @@ test "eloToMovetime: at 2800 returns 12000ms" {
 test "eloToMovetime: at 1000 returns 120ms" {
     try std.testing.expectEqual(@as(u16, 120), eloToMovetime(1000));
 }
-
 
 test "Move.fromUci: promotion round-trip" {
     const m = Move.fromUci("e7e8q").?;

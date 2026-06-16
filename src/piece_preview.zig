@@ -5,15 +5,7 @@ const sprites = rozinante.tui.sprites;
 const Theme = rozinante.tui.renderer.Theme;
 const chess = rozinante.chess;
 
-pub const Panic = struct {
-    pub const call = panicHandler;
-    pub const sentinelMismatch = std.debug.FormattedPanic.sentinelMismatch;
-    pub const unwrapError = std.debug.FormattedPanic.unwrapError;
-    pub const outOfBounds = std.debug.FormattedPanic.outOfBounds;
-    pub const startGreaterThanEnd = std.debug.FormattedPanic.startGreaterThanEnd;
-    pub const inactiveUnionField = std.debug.FormattedPanic.inactiveUnionField;
-    pub const messages = std.debug.FormattedPanic.messages;
-};
+pub const Panic = std.debug.FullPanic(panicHandler);
 
 var global_tty: ?vaxis.Tty = null;
 var global_vx: ?vaxis.Vaxis = null;

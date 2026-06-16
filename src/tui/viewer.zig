@@ -2,7 +2,6 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const chess = @import("../chess.zig");
 const renderer = @import("renderer.zig");
-const sprites = @import("sprites.zig");
 const pgn = @import("../persistence/pgn.zig");
 
 const Theme = renderer.Theme;
@@ -86,7 +85,7 @@ pub const ViewerState = struct {
             .width = board_w,
             .height = board_h,
         });
-        renderViewerBoard(board_win, self.currentBoard(), opts);
+        renderer.renderBoardCore(board_win, self.currentBoard(), opts, false, null);
 
         const info_x: u16 = board_w + 1;
         const info_w = if (win.width > info_x) win.width - info_x else 0;
@@ -171,94 +170,3 @@ pub const ViewerState = struct {
         }
     }
 };
-
-fn renderViewerBoard(win: Window, board: *const chess.Board, opts: renderer.RenderOptions) void {
-    const x_origin: u16 = if (opts.show_labels) opts.label_w else 0;
-    const use_sprites = opts.cell_w >= 5 and opts.cell_h >= 4;
-
-    const rank_labels = [_][]const u8{ "8", "7", "6", "5", "4", "3", "2", "1" };
-    const file_labels = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
-
-    for (0..8) |dr| {
-        const display_row: u3 = @intCast(dr);
-        const ry: u16 = @as(u16, display_row) * opts.cell_h;
-
-        if (opts.show_labels) {
-            win.writeCell(0, ry + opts.cell_h / 2, .{
-                .char = .{ .grapheme = rank_labels[dr], .width = 1 },
-                .style = .{ .fg = Theme.text_dim, .bg = Theme.bg },
-            });
-        }
-
-        for (0..8) |dc| {
-            const display_col: u3 = @intCast(dc);
-            const file: u3 = display_col;
-            const rank: u3 = 7 - display_row;
-            const sq_idx: u6 = @as(u6, rank) * 8 + @as(u6, file);
-            const piece = board.squares[sq_idx];
-            const bg = if ((@as(u4, file) + rank) % 2 == 0) Theme.dark_square else Theme.light_square;
-
-            const cx: u16 = x_origin + @as(u16, display_col) * opts.cell_w;
-
-            for (0..opts.cell_h) |row_off| {
-                const ry_off: u16 = ry + @as(u16, @intCast(row_off));
-                for (0..opts.cell_w) |col_off| {
-                    const cx_off: u16 = cx + @as(u16, @intCast(col_off));
-                    win.writeCell(cx_off, ry_off, .{
-                        .char = .{ .grapheme = " ", .width = 1 },
-                        .style = .{ .bg = bg },
-                    });
-                }
-            }
-
-            if (piece != .empty) {
-                if (use_sprites) {
-                    if (piece.pieceType()) |pt| {
-                        const fg = if (piece.isWhite()) Theme.white_piece else Theme.black_piece;
-                        sprites.stamp(win, sprites.forPieceType(pt), cx, ry, opts.cell_w, opts.cell_h, fg, bg);
-                    }
-                } else {
-                    const sym: ?[]const u8 = pieceToUnicode(piece);
-                    if (sym) |s| {
-                        const px = cx + opts.cell_w / 2;
-                        const py = ry + opts.cell_h / 2;
-                        const fg = if (piece.isWhite()) Theme.white_piece else Theme.black_piece;
-                        win.writeCell(px, py, .{
-                            .char = .{ .grapheme = s, .width = 1 },
-                            .style = .{ .fg = fg, .bg = bg },
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    if (opts.show_labels) {
-        for (0..8) |dc| {
-            const cx: u16 = x_origin + @as(u16, @intCast(dc)) * opts.cell_w + opts.cell_w / 2;
-            const fy: u16 = 8 * opts.cell_h;
-            win.writeCell(cx, fy, .{
-                .char = .{ .grapheme = file_labels[dc], .width = 1 },
-                .style = .{ .fg = Theme.text_dim, .bg = Theme.bg },
-            });
-        }
-    }
-}
-
-fn pieceToUnicode(p: chess.Piece) ?[]const u8 {
-    return switch (p) {
-        .white_king => "\u{2654}",
-        .white_queen => "\u{2655}",
-        .white_rook => "\u{2656}",
-        .white_bishop => "\u{2657}",
-        .white_knight => "\u{2658}",
-        .white_pawn => "\u{2659}",
-        .black_king => "\u{265A}",
-        .black_queen => "\u{265B}",
-        .black_rook => "\u{265C}",
-        .black_bishop => "\u{265D}",
-        .black_knight => "\u{265E}",
-        .black_pawn => "\u{265F}",
-        .empty => null,
-    };
-}

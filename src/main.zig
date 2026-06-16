@@ -50,15 +50,7 @@ fn fileLogFn(
     _ = linux.close(fd);
 }
 
-pub const Panic = struct {
-    pub const call = panicHandler;
-    pub const sentinelMismatch = std.debug.FormattedPanic.sentinelMismatch;
-    pub const unwrapError = std.debug.FormattedPanic.unwrapError;
-    pub const outOfBounds = std.debug.FormattedPanic.outOfBounds;
-    pub const startGreaterThanEnd = std.debug.FormattedPanic.startGreaterThanEnd;
-    pub const inactiveUnionField = std.debug.FormattedPanic.inactiveUnionField;
-    pub const messages = std.debug.FormattedPanic.messages;
-};
+pub const Panic = std.debug.FullPanic(panicHandler);
 
 fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
     if (global_tty) |*tty| {
@@ -103,11 +95,6 @@ const EngineResult = struct {
     failed: bool = false,
 };
 
-const AnalysisResult = struct {
-    best_move: ?chess.Move = null,
-    failed: bool = false,
-};
-
 fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *EngineResult, event_loop: *vaxis.Loop(Event)) void {
     if (eng.getMove(board)) |m| {
         result.move = m;
@@ -117,7 +104,7 @@ fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Engin
     event_loop.postEvent(.engine_move_ready) catch {};
 }
 
-fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *AnalysisResult, event_loop: *vaxis.Loop(Event)) void {
+fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *EngineResult, event_loop: *vaxis.Loop(Event)) void {
     hints_log.debug("background analysis started", .{});
     const analysis = eng.analyze(board, 500) catch {
         hints_log.warn("background analysis failed", .{});
@@ -125,7 +112,7 @@ fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Ana
         event_loop.postEvent(.engine_analysis_ready) catch {};
         return;
     };
-    result.best_move = analysis.best_move;
+    result.move = analysis.best_move;
     if (analysis.best_move) |m| {
         var buf: [5]u8 = undefined;
         const uci = m.toUci(&buf);
@@ -139,11 +126,8 @@ fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Ana
 const MIN_W: u16 = 94;
 const MIN_H: u16 = 33;
 
-fn selectRenderOpts(width: u16, height: u16) ?renderer.RenderOptions {
-    if (width >= MIN_W and height >= MIN_H) {
-        return renderer.RenderOptions{};
-    }
-    return null;
+fn fits(width: u16, height: u16) bool {
+    return width >= MIN_W and height >= MIN_H;
 }
 
 fn dispatchEngineMove(
@@ -183,7 +167,7 @@ fn dispatchAnalysis(
     eng: *engine_mod.Engine,
     game_state: *const Game,
     analysis_board: *chess.Board,
-    analysis_result: *AnalysisResult,
+    analysis_result: *EngineResult,
     analysis_future: *?Io.Future(void),
     analysis_pending: *bool,
     loop_ptr: *vaxis.Loop(Event),
@@ -230,9 +214,8 @@ fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
     win.clear();
     win.fill(.{ .style = .{ .bg = renderer.Theme.bg } });
 
-    const maybe_opts = selectRenderOpts(win.width, win.height);
-
-    if (maybe_opts) |opts| {
+    if (fits(win.width, win.height)) {
+        const opts = renderer.RenderOptions{};
         const board_w = renderer.boardWidth(opts);
         const board_h = renderer.boardHeight(opts);
 
@@ -493,25 +476,26 @@ pub fn main(init: std.process.Init) !void {
         global_vx = null;
     }
 
-    // --- Persistence setup ---
+    // --- Persistence setup (optional; both dirs or neither) ---
     log.debug("resolving data and config directories", .{});
-    const data_dir = storage.getDataDir(alloc, io, init.environ_map) catch |err| {
+    var prefs: config.Preferences = .{};
+    var data_dir: ?[]const u8 = null;
+    var config_dir: ?[]const u8 = null;
+    if (storage.getDataDir(alloc, io, init.environ_map)) |dd| {
+        if (storage.getConfigDir(alloc, io, init.environ_map)) |cd| {
+            data_dir = dd;
+            config_dir = cd;
+            log.debug("data_dir={s} config_dir={s}", .{ dd, cd });
+            storage.ensureDirExists(io, dd) catch {};
+            storage.ensureDirExists(io, cd) catch {};
+            prefs = config.loadPreferences(alloc, io, cd);
+            config.savePreferences(alloc, io, prefs, cd) catch {};
+        } else |err| {
+            log.warn("failed to resolve config directory: {}, persistence disabled", .{err});
+        }
+    } else |err| {
         log.warn("failed to resolve data directory: {}, persistence disabled", .{err});
-        return mainNoPersistence(init, io, alloc, &tty, &vx);
-    };
-    const config_dir = storage.getConfigDir(alloc, io, init.environ_map) catch |err| {
-        log.warn("failed to resolve config directory: {}, persistence disabled", .{err});
-        return mainNoPersistence(init, io, alloc, &tty, &vx);
-    };
-    log.debug("data_dir={s} config_dir={s}", .{ data_dir, config_dir });
-    storage.ensureDirExists(io, data_dir) catch {};
-    storage.ensureDirExists(io, config_dir) catch {};
-
-    // Load preferences
-    var prefs = config.loadPreferences(alloc, io, config_dir);
-
-    // Save defaults on first launch (creates config.json if missing)
-    config.savePreferences(alloc, io, prefs, config_dir) catch {};
+    }
 
     // Find Stockfish (with preference override)
     const stockfish_path = engine_mod.findStockfish(io, prefs.stockfish_path) catch {
@@ -540,7 +524,7 @@ pub fn main(init: std.process.Init) !void {
     var engine_board: chess.Board = undefined;
 
     var analysis_future: ?Io.Future(void) = null;
-    var analysis_result: AnalysisResult = .{};
+    var analysis_result: EngineResult = .{};
     var analysis_board: chess.Board = undefined;
     var analysis_pending: bool = false;
 
@@ -553,18 +537,20 @@ pub fn main(init: std.process.Init) !void {
         var resume_elo: u16 = prefs.default_elo;
         var resume_color: chess.Color = .white;
 
-        const games = storage.listGames(alloc, io, data_dir) catch &.{};
-        for (games) |g| {
-            if (!g.is_finished) {
-                // Build full filepath
-                resume_filepath = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch null;
-                resume_elo = g.elo;
-                if (std.mem.eql(u8, g.player_color, "black")) {
-                    resume_color = .black;
-                } else {
-                    resume_color = .white;
+        if (data_dir) |dd| {
+            const games = storage.listGames(alloc, io, dd) catch &.{};
+            for (games) |g| {
+                if (!g.is_finished) {
+                    // Build full filepath
+                    resume_filepath = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dd, g.filename }) catch null;
+                    resume_elo = g.elo;
+                    if (std.mem.eql(u8, g.player_color, "black")) {
+                        resume_color = .black;
+                    } else {
+                        resume_color = .white;
+                    }
+                    break;
                 }
-                break;
             }
         }
 
@@ -593,13 +579,13 @@ pub fn main(init: std.process.Init) !void {
                             menu_action = .resume_game;
                             menu_done = true;
                         },
-                        .game_history => {
-                            var history_list: std.ArrayList(storage.GameInfo) = if (storage.listGames(alloc, io, data_dir)) |sl|
+                        .game_history => if (data_dir) |dd| {
+                            var history_list: std.ArrayList(storage.GameInfo) = if (storage.listGames(alloc, io, dd)) |sl|
                                 std.ArrayList(storage.GameInfo).fromOwnedSlice(sl)
                             else |_|
                                 std.ArrayList(storage.GameInfo).empty;
                             var selected_fp: ?[]const u8 = null;
-                            const hist_result = runGameHistory(io, alloc, &loop, &vx, &tty, &history_list, data_dir, &selected_fp);
+                            const hist_result = runGameHistory(io, alloc, &loop, &vx, &tty, &history_list, dd, &selected_fp);
                             if (hist_result == .resume_game) {
                                 if (selected_fp) |fp| {
                                     // Parse the selected game to extract elo and color for resume
@@ -646,7 +632,7 @@ pub fn main(init: std.process.Init) !void {
             if (menu_config.elo != prefs.default_elo or !std.mem.eql(u8, menu_color_str, prefs.default_color)) {
                 prefs.default_elo = menu_config.elo;
                 prefs.default_color = menu_color_str;
-                config.savePreferences(alloc, io, prefs, config_dir) catch {};
+                if (config_dir) |cd| config.savePreferences(alloc, io, prefs, cd) catch {};
             }
         }
 
@@ -774,7 +760,7 @@ pub fn main(init: std.process.Init) !void {
                                     else
                                         "Black resigns \u{2014} White wins";
 
-                                    autoSave(io, alloc, &game_state, data_dir, &current_save_path, game_elo, player_color, game_start_secs);
+                                    if (data_dir) |dd| autoSave(io, alloc, &game_state, dd, &current_save_path, game_elo, player_color, game_start_secs);
                                     continue :main_loop;
                                 }
                             },
@@ -851,7 +837,7 @@ pub fn main(init: std.process.Init) !void {
                         if (analysis_pending) {
                             analysis_pending = false;
                             if (!analysis_result.failed) {
-                                if (analysis_result.best_move) |move| {
+                                if (analysis_result.move) |move| {
                                     game_state.hint_best_move = .{ .from = move.from, .to = move.to };
                                     var uci_buf: [5]u8 = undefined;
                                     const uci = move.toUci(&uci_buf);
@@ -874,7 +860,7 @@ pub fn main(init: std.process.Init) !void {
             if (game_state.move_count > prev_move_count) {
                 log.debug("move #{d} detected, triggering auto-save", .{game_state.move_count});
                 prev_move_count = game_state.move_count;
-                autoSave(io, alloc, &game_state, data_dir, &current_save_path, game_elo, player_color, game_start_secs);
+                if (data_dir) |dd| autoSave(io, alloc, &game_state, dd, &current_save_path, game_elo, player_color, game_start_secs);
                 log.debug("auto-save completed for move #{d}", .{game_state.move_count});
             }
 
@@ -889,244 +875,6 @@ pub fn main(init: std.process.Init) !void {
             }
 
             renderGame(&vx, &game_state);
-            try vx.render(tty.writer());
-
-            if (event == null) {
-                io.sleep(Io.Duration.fromMilliseconds(100), .awake) catch {};
-            }
-        }
-    }
-}
-
-fn mainNoPersistence(init: std.process.Init, io: Io, alloc: std.mem.Allocator, tty: *vaxis.Tty, vx: *vaxis.Vaxis) !void {
-    const stockfish_path = engine_mod.findStockfish(io, null) catch {
-        const w = tty.writer();
-        w.writeAll("Error: Stockfish not found. Please install Stockfish:\r\n") catch {};
-        w.writeAll("  Ubuntu/Debian: sudo apt install stockfish\r\n") catch {};
-        w.writeAll("  macOS:         brew install stockfish\r\n") catch {};
-        w.writeAll("  Arch:          sudo pacman -S stockfish\r\n") catch {};
-        return;
-    };
-
-    var loop: vaxis.Loop(Event) = .init(io, tty, vx);
-    try loop.start();
-    defer loop.stop();
-
-    try vx.enterAltScreen(tty.writer());
-    try vx.queryTerminal(tty.writer(), Io.Duration.fromMilliseconds(3000));
-
-    var current_engine: ?engine_mod.Engine = null;
-    defer {
-        if (current_engine) |*eng| eng.deinit();
-    }
-
-    var engine_future: ?Io.Future(void) = null;
-    var engine_result: EngineResult = .{};
-    var engine_board: chess.Board = undefined;
-
-    var analysis_future: ?Io.Future(void) = null;
-    var analysis_result: AnalysisResult = .{};
-    var analysis_board: chess.Board = undefined;
-    var analysis_pending: bool = false;
-
-    const opening_book = try alloc.create(openings.OpeningBook);
-    opening_book.* = openings.OpeningBook.init();
-
-    _ = init;
-
-    main_loop: while (true) {
-        var menu_state = Menu{};
-        var menu_done = false;
-
-        while (!menu_done) {
-            const event = try loop.nextEvent();
-            switch (event) {
-                .key_press => |key| {
-                    const action = menu_state.handleInput(key);
-                    switch (action) {
-                        .quit => return,
-                        .start => menu_done = true,
-                        .render, .none, .resume_game, .game_history => {},
-                    }
-                },
-                .winsize => |ws| {
-                    try vx.resize(alloc, tty.writer(), ws);
-                },
-                else => {},
-            }
-
-            const win = vx.window();
-            win.clear();
-            menu_state.render(win);
-            try vx.render(tty.writer());
-        }
-
-        const menu_config = menu_state.getConfig();
-
-        if (current_engine) |*eng| {
-            cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
-        }
-        cancelEngineFuture(&engine_future, io);
-        if (current_engine) |*eng| {
-            eng.deinit();
-            current_engine = null;
-        }
-
-        current_engine = engine_mod.Engine.init(io, stockfish_path, menu_config.elo) catch {
-            continue :main_loop;
-        };
-        if (current_engine) |*eng| eng.relocate();
-
-        const player_color: chess.Color = switch (menu_config.player_color) {
-            .white => .white,
-            .black => .black,
-            .random => if (@mod(Io.Timestamp.now(io, .awake).nanoseconds, 2) == 0) .white else .black,
-        };
-
-        var game_state = Game.initWithColorAndBook(player_color, opening_book);
-
-        if (game_state.isEngineTurn()) {
-            dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
-        }
-
-        renderGame(vx, &game_state);
-        try vx.render(tty.writer());
-
-        game_loop: while (true) {
-            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting or analysis_pending)
-                loop.tryEvent() catch null
-            else
-                loop.nextEvent() catch null;
-
-            if (event) |ev| {
-                switch (ev) {
-                    .key_press => |key| {
-                        const action = input.handleKeyPress(&game_state, key);
-                        switch (action) {
-                            .quit => {
-                                if (current_engine) |*eng| {
-                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
-                                }
-                                cancelEngineFuture(&engine_future, io);
-                                return;
-                            },
-                            .new_game => {
-                                if (current_engine) |*eng| {
-                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
-                                }
-                                cancelEngineFuture(&engine_future, io);
-                                game_state.engine_state = .idle;
-                                continue :main_loop;
-                            },
-                            .resign => {
-                                if (game_state.game_phase == .playing) {
-                                    if (current_engine) |*eng| {
-                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
-                                    }
-                                    cancelEngineFuture(&engine_future, io);
-                                    game_state.engine_state = .idle;
-                                    game_state.game_phase = .ended;
-                                    game_state.result = if (game_state.player_color == .white)
-                                        "White resigns \u{2014} Black wins"
-                                    else
-                                        "Black resigns \u{2014} White wins";
-                                }
-                            },
-                            .toggle_hints => {
-                                game_state.hints_enabled = !game_state.hints_enabled;
-                                if (game_state.hints_enabled) {
-                                    game_state.computeEndangered();
-                                    if (current_engine) |*eng| {
-                                        dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
-                                    }
-                                } else {
-                                    if (current_engine) |*eng| {
-                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
-                                    }
-                                    game_state.clearHints();
-                                }
-                            },
-                            .render => {
-                                game_state.tickFlash();
-                                game_state.tickEngineHighlight();
-
-                                if (game_state.isEngineTurn() and game_state.engine_state == .idle) {
-                                    if (current_engine) |*eng| {
-                                        cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
-                                    }
-                                    dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
-                                }
-                            },
-                            .none => {},
-                        }
-                    },
-                    .engine_move_ready => {
-                        if (engine_future) |*f| {
-                            f.await(io);
-                            engine_future = null;
-                        }
-
-                        if (engine_result.failed) {
-                            game_state.engine_state = .reconnecting;
-                            if (current_engine) |*eng| {
-                                eng.restart(&game_state.board) catch {
-                                    game_state.engine_state = .@"error";
-                                    continue :game_loop;
-                                };
-                                dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop);
-                            }
-                        } else if (engine_result.move) |move| {
-                            game_state.executeMove(move.from, move.to, if (move.move_type == .promotion) move.promotion_piece else null);
-                            game_state.engine_last_move = .{ .from = move.from, .to = move.to };
-                            game_state.engine_last_move_timer = 8;
-                            game_state.engine_state = .idle;
-
-                            if (game_state.hints_enabled and game_state.isHumanTurn()) {
-                                game_state.computeEndangered();
-                                if (current_engine) |*eng| {
-                                    dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
-                                }
-                            }
-                        }
-                        engine_result = .{};
-                    },
-                    .engine_analysis_ready => {
-                        if (analysis_future) |*f| {
-                            f.await(io);
-                            analysis_future = null;
-                        }
-                        if (analysis_pending) {
-                            analysis_pending = false;
-                            if (!analysis_result.failed) {
-                                if (analysis_result.best_move) |move| {
-                                    game_state.hint_best_move = .{ .from = move.from, .to = move.to };
-                                    var uci_buf: [5]u8 = undefined;
-                                    const uci = move.toUci(&uci_buf);
-                                    hints_log.debug("best move hint set: {s}", .{uci});
-                                }
-                            } else {
-                                hints_log.warn("analysis result: failed", .{});
-                            }
-                        }
-                        analysis_result = .{};
-                    },
-                    .winsize => |ws| {
-                        try vx.resize(alloc, tty.writer(), ws);
-                    },
-                    else => {},
-                }
-            }
-
-            if (game_state.engine_state == .thinking) {
-                const now_ns = Io.Timestamp.now(io, .awake).nanoseconds;
-                const elapsed_ns = now_ns - game_state.thinking_start_ns;
-                const elapsed_s = @divTrunc(elapsed_ns, std.time.ns_per_s);
-                game_state.thinking_elapsed_s = if (elapsed_s >= 0) @intCast(@min(elapsed_s, 9999)) else 0;
-                const spinner_raw = @divTrunc(elapsed_ns, 250 * std.time.ns_per_ms);
-                game_state.spinner_idx = @intCast(@as(u2, @truncate(@as(u64, @intCast(@max(spinner_raw, 0))))));
-            }
-
-            renderGame(vx, &game_state);
             try vx.render(tty.writer());
 
             if (event == null) {

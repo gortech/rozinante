@@ -199,11 +199,7 @@ pub const Game = struct {
     hint_best_move: ?LastMove,
 
     pub fn init() Game {
-        return initWithColor(.white);
-    }
-
-    pub fn initWithColor(player_color: chess.Color) Game {
-        return initWithColorAndBook(player_color, null);
+        return initWithColorAndBook(.white, null);
     }
 
     pub fn initWithColorAndBook(player_color: chess.Color, book: ?*const openings.OpeningBook) Game {
@@ -446,12 +442,6 @@ pub const Game = struct {
         self.game_phase = .playing;
         self.result = null;
         self.promotion_pending = null;
-    }
-
-    pub fn newGame(self: *Game) void {
-        const book = self.opening_book;
-        self.* = init();
-        self.opening_book = book;
     }
 
     fn updateOpening(self: *Game) void {
