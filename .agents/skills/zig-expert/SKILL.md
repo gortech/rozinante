@@ -1,21 +1,16 @@
 ---
 name: zig-expert
 description: >
-  Zig 0.16.0 programming reference for building Rozinante — a TUI chess game in Zig.
-  Covers the APIs and patterns actually used in this project: std.Io threading, std.process
-  subprocess I/O, known_folders, std.json, atomic file writes, scoped logging, arena allocator,
-  build system (build.zig / build.zig.zon), testing with std.testing (including fuzz),
-  barrel modules, and bit-packed enums.
-  Use this skill whenever writing, reviewing, debugging, or modifying any Zig code in this project.
-  Triggers on: any .zig file work, Zig compiler errors, build.zig changes, zig build failures,
-  writing tests, designing data types, subprocess communication, file I/O, JSON parsing,
-  or file format parsing.
-  If the task involves Zig code, use this skill.
-allowed-tools:
-  - Read
-  - Bash
-  - Write
-updated: 2026-05-08
+  Zig 0.16.0 programming reference for the Rozinante TUI chess game. Covers the
+  APIs and patterns this project actually uses: std.Io threading, std.process
+  subprocess I/O, known_folders, std.json, atomic file writes, scoped logging,
+  arena allocator, the build system (build.zig / build.zig.zon), std.testing,
+  barrel modules, and bit-packed enums. Use it whenever writing, reviewing,
+  debugging, or modifying any Zig code here — .zig edits, compiler errors,
+  zig build failures, writing tests, designing data types, subprocess
+  communication, file I/O, JSON parsing, or file-format parsing. If the task
+  involves Zig code, use this skill.
+updated: 2026-06-16
 references: []
 ---
 
@@ -45,25 +40,25 @@ Check local docs before web search. When uncertain about an API, read the source
 
 ## Core Rules
 
-Rules that complement (not duplicate) CLAUDE.md/AGENTS.md:
+Rules that complement (not duplicate) CLAUDE.md/AGENTS.md. The reasoning matters more than the rule — once you know *why*, you can apply it to cases this list doesn't name.
 
 **MUST:**
-- Thread `io: std.Io` from `main(init)` to any function that does I/O — filesystem, subprocess, network
-- Thread allocator explicitly — no globals, no hidden state
-- `defer` immediately after every allocation for cleanup
-- Prefer stack allocation for fixed-size data (buffers, small arrays)
-- Use `ArenaAllocator` for groups of allocations with the same lifetime
-- Use `GeneralPurposeAllocator` in tests for leak detection
-- `errdefer` for cleanup on error paths
-- Explicit error handling — switch on errors at boundaries, propagate with `try` internally
-- Unused bindings → `_ = value;` (compiler rejects unused locals)
-- Use `std.log.scoped(.tag)` for structured logging — not `std.debug.print` in production
+- Thread `io: std.Io` from `main(init)` into any function that does I/O — Zig 0.16 makes I/O an injected value, so threading it is what keeps the backend swappable and lets tests run against a single-threaded io.
+- Thread the allocator explicitly (no globals, no hidden state) — the caller owns lifetime, and tests can substitute a leak-detecting allocator.
+- `defer` the cleanup immediately after each allocation — acquire and release sit together, so no later code path can forget it.
+- Prefer stack allocation for fixed-size data (buffers, small arrays) — no allocator, no failure path, nothing to leak.
+- Use `ArenaAllocator` for groups of allocations that share a lifetime — free them in one shot instead of tracking each.
+- Use `GeneralPurposeAllocator` in tests — it surfaces leaks the production allocator silently tolerates.
+- `errdefer` on error paths — releases a half-built resource without repeating the cleanup in every branch.
+- Handle errors explicitly — propagate with `try` internally; `switch` on them at boundaries where you can add context.
+- Discard unused bindings with `_ = value;` — the compiler rejects unused locals, so this is required, not stylistic.
+- Log via `std.log.scoped(.tag)`, not `std.debug.print`, in production — scoped tags are filterable and route through the configured log function.
 
 **MUST NOT:**
-- `@panic` in production code — return errors instead
-- Global mutable state — pass context through parameters
-- `undefined` without immediate initialization — only use for buffers about to be filled
-- Ignore allocator threading — collections need allocator passed to every mutating method
+- `@panic` in production — return an error so the caller decides; the only panic handler here exists to restore the terminal on the way down.
+- Global mutable state — pass context through parameters so behavior stays testable and thread-safe.
+- `undefined` without immediate initialization — only for buffers about to be filled; reading `undefined` is UB.
+- Skip allocator threading on collections — every mutating method needs the allocator passed in.
 
 ## Decision Trees
 
@@ -101,10 +96,9 @@ Error handling? ───┬─► Internal propagation ────────
 Testing? ──────────┬─► Unit test ───────────────────────► test "name" { ... } at bottom of file
                    ├─► Test I/O setup ─────────────────► std.Io.Threaded.global_single_threaded.io()
                    ├─► Allocation test ─────────────────► std.testing.allocator (detects leaks)
-                   ├─► Fuzz test ───────────────────────► std.testing.fuzz({}, fn, .{})
                    ├─► Test discovery ─────────────────► std.testing.refAllDecls(@This()) in root module
                    ├─► Assertions ──────────────────────► std.testing.expectEqual / expectEqualStrings / expect
-                   └─► Run ─────────────────────────────► zig build test [--summary all] [--fuzz]
+                   └─► Run ─────────────────────────────► zig build test [--summary all]
 ```
 
 ```
@@ -145,7 +139,7 @@ test {
 
 **Bit-packed enums:** `Piece` is `u4` (color in bit 3, type in bits 0-2, `empty = 15`). `Color` is `u1`, `PieceType` is `u3`, `CastlingRights` is `packed struct(u4)`.
 
-**Scoped logging:** Use `const log = std.log.scoped(.tag);` at module level. Tags: `.persistence`, `.engine`.
+**Scoped logging:** Use `const log = std.log.scoped(.tag);` at module level. Tags in use: `.engine`, `.persistence`, `.hints`.
 
 **Buffer-based output:** Prefer returning `[]const u8` from a caller-provided `[]u8` buffer over allocating. Matches the project's stack-allocation conventions (e.g. `writePgn`, `generateFilename`).
 
