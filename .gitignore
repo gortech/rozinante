@@ -5,11 +5,6 @@
 .specs/scratchpad/
 .codemap/
 
-# ── GSD baseline (auto-generated) ──
-.gsd
-.gsd-id
-.mcp.json
-.bg-shell/
 Thumbs.db
 *.swp
 *.swo
