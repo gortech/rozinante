@@ -123,8 +123,10 @@ fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Eng
     event_loop.postEvent(.engine_analysis_ready) catch {};
 }
 
-const MIN_W: u16 = 118;
-const MIN_H: u16 = 49;
+// Resize gate, derived from renderer geometry so a cell-size change auto-propagates.
+const min_info_w: u16 = 19; // info-panel columns right of the board (info_x = board_w + 1)
+const MIN_W: u16 = renderer.boardWidth(.{}) + 1 + min_info_w;
+const MIN_H: u16 = renderer.boardHeight(.{});
 
 fn fits(width: u16, height: u16) bool {
     return width >= MIN_W and height >= MIN_H;

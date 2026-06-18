@@ -1,3 +1,4 @@
+const std = @import("std");
 const vaxis = @import("vaxis");
 const Cell = vaxis.Cell;
 const Color = Cell.Color;
@@ -26,9 +27,14 @@ pub const Theme = struct {
     pub const highlight_hint_best: Color = .{ .rgb = .{ 50, 200, 100 } };
 };
 
+// drawMarks is hand-fitted to exactly this cell geometry; the RenderOptions
+// defaults and the drawMarks guard both reference it so they cannot drift apart.
+const min_cell_w: u16 = 12;
+const min_cell_h: u16 = 6;
+
 pub const RenderOptions = struct {
-    cell_w: u16 = 12,
-    cell_h: u16 = 6,
+    cell_w: u16 = min_cell_w,
+    cell_h: u16 = min_cell_h,
     label_w: u16 = 2,
     label_h: u16 = 1,
     show_labels: bool = true,
@@ -194,10 +200,11 @@ fn drawOutline(win: Window, cx: u16, ry: u16, opts: RenderOptions, lv: OutlineLe
 /// Geometry assumes the 12x6 cell — even dims have no single middle cell, so
 /// centered marks span the two straddling rows/cols.
 pub fn drawMarks(win: Window, cx: u16, ry: u16, opts: RenderOptions, marks: Marks, base: Color) void {
-    // ponytail: hand-fitted to the 12x6 cell (1-cell margin around the centered
-    // 5x4 sprite). The only live caller renders at exactly that size; smaller
-    // windows show the resize message, so below it we draw nothing.
-    if (opts.cell_w < 12 or opts.cell_h < 6) return;
+    // Hand-fitted to the min_cell_w x min_cell_h (12x6) cell — a 6x4
+    // sprite centered with a 3-col horizontal / 1-row vertical margin. The only
+    // live caller renders at exactly that size; smaller windows show the resize
+    // message, so below it we draw nothing.
+    if (opts.cell_w < min_cell_w or opts.cell_h < min_cell_h) return;
 
     const left = cx;
     const right = cx + opts.cell_w - 1;
@@ -598,6 +605,8 @@ test "squareMarks: capture composes with endangered and best-move corners (AE2)"
     try testing.expectEqual(BorderStyle.capture, m.border.?);
     try testing.expect(m.endangered);
     try testing.expect(m.best_move);
+    // from-arm of the best_move disjunction (bm.from == sq)
+    try testing.expect(squareMarks(&game, chess.Square.init(.a, .@"1").toIndex()).best_move);
 }
 
 test "squareMarks: check outranks selected on the king square (AE3)" {
@@ -659,6 +668,8 @@ test "squareMarks: engine-last-move alone yields engine border" {
 
     const m = squareMarks(&game, sq.toIndex());
     try testing.expectEqual(BorderStyle.engine, m.border.?);
+    // from-arm of the engine disjunction (em.from == sq)
+    try testing.expectEqual(BorderStyle.engine, squareMarks(&game, chess.Square.init(.a, .@"3").toIndex()).border.?);
 }
 
 test "squareMarks: flash wins over selected when timer active" {
@@ -704,4 +715,57 @@ test "squareMarks: quiet empty square has no marks" {
     const m = squareMarks(&game, sq.toIndex());
     try testing.expect(m.border == null);
     try testing.expect(!m.cursor and !m.endangered and !m.best_move and !m.center);
+}
+
+test "drawMarks: writes nothing below the minimum cell size (guard)" {
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .rows = 20, .cols = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    const win = Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 20, .screen = &screen };
+
+    for (0..20) |y| {
+        for (0..20) |x| {
+            win.writeCell(@intCast(x), @intCast(y), .{ .char = .{ .grapheme = "X", .width = 1 } });
+        }
+    }
+
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    drawMarks(win, 2, 2, .{ .cell_w = 11, .cell_h = 6 }, marks, Theme.dark_square);
+
+    for (0..20) |y| {
+        for (0..20) |x| {
+            try testing.expectEqualStrings("X", screen.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
+        }
+    }
+}
+
+test "drawMarks: marks stay inside the cell rect (containment)" {
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .rows = 20, .cols = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    const win = Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 20, .screen = &screen };
+
+    for (0..20) |y| {
+        for (0..20) |x| {
+            win.writeCell(@intCast(x), @intCast(y), .{ .char = .{ .grapheme = "X", .width = 1 } });
+        }
+    }
+
+    const cx: u16 = 2;
+    const ry: u16 = 2;
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    drawMarks(win, cx, ry, .{}, marks, Theme.dark_square);
+
+    // It actually drew: the cell's top-left corner is now a (multi-byte) mark glyph, not the sentinel.
+    try testing.expect(!std.mem.eql(u8, "X", screen.readCell(cx, ry).?.char.grapheme));
+
+    // No mark bled outside [cx, cx+12) x [ry, ry+6); vaxis clips to the window, not the cell.
+    for (0..20) |yy| {
+        for (0..20) |xx| {
+            const x: u16 = @intCast(xx);
+            const y: u16 = @intCast(yy);
+            const inside = x >= cx and x < cx + 12 and y >= ry and y < ry + 6;
+            if (!inside) {
+                try testing.expectEqualStrings("X", screen.readCell(x, y).?.char.grapheme);
+            }
+        }
+    }
 }
