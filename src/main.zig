@@ -790,6 +790,20 @@ pub fn main(init: std.process.Init) !void {
                                     game_state.clearHints();
                                 }
                             },
+                            .undo => {
+                                // A hint search for the pre-undo board may still be in
+                                // flight; cancel it first so it can't land a stale
+                                // hint_best_move on the restored position (R4).
+                                if (current_engine) |*eng| {
+                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                }
+                                if (game_state.hints_enabled) {
+                                    game_state.computeEndangered();
+                                    if (current_engine) |*eng| {
+                                        dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
+                                    }
+                                }
+                            },
                             .render => {
                                 game_state.tickFlash();
                                 game_state.tickEngineHighlight();

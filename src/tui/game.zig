@@ -444,6 +444,20 @@ pub const Game = struct {
         self.promotion_pending = null;
     }
 
+    /// Take back the last move-pair (engine reply + player move), landing back on
+    /// the player's turn. Floor: never pop below the player's first turn (White:
+    /// move_count 0; Black: move_count 1, keeping the engine's opening). No-op when
+    /// fewer than two plies remain above the floor.
+    pub fn undoMovePair(self: *Game) void {
+        const floor: usize = if (self.player_color == .black) 1 else 0;
+        if (self.move_count < floor + 2) return;
+        self.undoMove();
+        self.undoMove();
+        self.clearHints();
+        self.engine_last_move = null;
+        self.updateOpening();
+    }
+
     fn updateOpening(self: *Game) void {
         const book = self.opening_book orelse return;
 
@@ -652,4 +666,78 @@ test "executeMove clears hints" {
         try testing.expect(!game.hint_endangered[i]);
     }
     try testing.expect(game.hint_best_move == null);
+}
+
+fn tsq(f: chess.File, r: chess.Rank) chess.Square {
+    return chess.Square.init(f, r);
+}
+
+test "undoMovePair: white reverts two plies to the starting position (AE1)" {
+    var game = Game.init();
+    const init_board = chess.Board.initial;
+    var b0: [128]u8 = undefined;
+    const initial_fen = init_board.toFen(&b0);
+
+    game.executeMove(tsq(.e, .@"2"), tsq(.e, .@"4"), null);
+    game.executeMove(tsq(.e, .@"7"), tsq(.e, .@"5"), null);
+    try testing.expectEqual(@as(usize, 2), game.move_count);
+
+    game.undoMovePair();
+    try testing.expectEqual(@as(usize, 0), game.move_count);
+    try testing.expectEqual(chess.Color.white, game.board.active_color);
+    var b1: [128]u8 = undefined;
+    try testing.expectEqualStrings(initial_fen, game.board.toFen(&b1));
+}
+
+test "undoMovePair: repeats down to zero from four plies (AE1)" {
+    var game = Game.init();
+    game.executeMove(tsq(.e, .@"2"), tsq(.e, .@"4"), null);
+    game.executeMove(tsq(.e, .@"7"), tsq(.e, .@"5"), null);
+    game.executeMove(tsq(.g, .@"1"), tsq(.f, .@"3"), null);
+    game.executeMove(tsq(.b, .@"8"), tsq(.c, .@"6"), null);
+    try testing.expectEqual(@as(usize, 4), game.move_count);
+    game.undoMovePair();
+    try testing.expectEqual(@as(usize, 2), game.move_count);
+    game.undoMovePair();
+    try testing.expectEqual(@as(usize, 0), game.move_count);
+}
+
+test "undoMovePair: black keeps the engine opening (R2)" {
+    var game = Game.initWithColorAndBook(.black, null);
+    game.executeMove(tsq(.e, .@"2"), tsq(.e, .@"4"), null); // engine opening (white)
+    game.executeMove(tsq(.e, .@"7"), tsq(.e, .@"5"), null); // player (black)
+    game.executeMove(tsq(.g, .@"1"), tsq(.f, .@"3"), null); // engine (white)
+    try testing.expectEqual(@as(usize, 3), game.move_count);
+
+    game.undoMovePair();
+    try testing.expectEqual(@as(usize, 1), game.move_count);
+    try testing.expectEqual(chess.Color.black, game.board.active_color);
+
+    game.undoMovePair(); // floor reached: no-op
+    try testing.expectEqual(@as(usize, 1), game.move_count);
+}
+
+test "undoMovePair: no-op below floor (AE4/R5)" {
+    var game = Game.init();
+    game.executeMove(tsq(.e, .@"2"), tsq(.e, .@"4"), null);
+    try testing.expectEqual(@as(usize, 1), game.move_count);
+    game.undoMovePair();
+    try testing.expectEqual(@as(usize, 1), game.move_count);
+}
+
+test "undoMovePair: restores playing phase and clears hints (R4)" {
+    var game = Game.init();
+    game.executeMove(tsq(.e, .@"2"), tsq(.e, .@"4"), null);
+    game.executeMove(tsq(.e, .@"7"), tsq(.e, .@"5"), null);
+    game.hints_enabled = true;
+    game.hint_best_move = .{ .from = tsq(.e, .@"2"), .to = tsq(.e, .@"4") };
+    game.hint_endangered[10] = true;
+    game.game_phase = .ended;
+    game.result = "Checkmate";
+
+    game.undoMovePair();
+    try testing.expectEqual(GamePhase.playing, game.game_phase);
+    try testing.expect(game.result == null);
+    try testing.expect(game.hint_best_move == null);
+    try testing.expect(!game.hint_endangered[10]);
 }

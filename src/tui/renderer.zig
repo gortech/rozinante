@@ -547,7 +547,7 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     // Keybind hints at bottom
     const hint_y = win.height -| 2;
     if (hint_y > y) {
-        _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select  U Undo", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         var hint_col = writeStr(win, 1, hint_y + 1, "R Resign N Menu F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         hint_col = writeStr(win, hint_col + 1, hint_y + 1, "H Hints", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         const hint_status: []const u8 = if (game.hints_enabled) " On" else " Off";
