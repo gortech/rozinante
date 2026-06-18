@@ -18,17 +18,31 @@ pub const HistoryScreen = struct {
     games: std.ArrayList(storage.GameInfo),
     cursor: usize,
     scroll: usize,
+    delete_pending: bool,
 
     pub fn init(games: std.ArrayList(storage.GameInfo)) HistoryScreen {
         return .{
             .games = games,
             .cursor = 0,
             .scroll = 0,
+            .delete_pending = false,
         };
     }
 
     pub fn handleInput(self: *HistoryScreen, key: vaxis.Key) HistoryAction {
         const total = self.games.items.len;
+
+        if (self.delete_pending) {
+            if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
+                self.delete_pending = false;
+                return .delete;
+            }
+            if (key.matches('n', .{}) or key.matches(vaxis.Key.escape, .{})) {
+                self.delete_pending = false;
+                return .none;
+            }
+            return .none;
+        }
 
         if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
             return .back;
@@ -44,7 +58,8 @@ pub const HistoryScreen = struct {
             return if (g.is_finished) .select_finished else .select_unfinished;
         }
         if (key.matches(vaxis.Key.delete, .{}) and total > 0) {
-            return .delete;
+            self.delete_pending = true;
+            return .none;
         }
         return .none;
     }
@@ -126,7 +141,9 @@ pub const HistoryScreen = struct {
 
         const hint_y = win.height -| 2;
         if (hint_y > y) {
-            const hints = if (total > 0)
+            const hints = if (self.delete_pending)
+                "Delete permanently? Y/Enter = Yes  N/Esc = No"
+            else if (total > 0)
                 "\xe2\x86\x91\xe2\x86\x93 Navigate  Enter View  Del Remove  Esc Back"
             else
                 "Esc Back";
@@ -155,4 +172,34 @@ test "displayResult maps PGN results to human-readable" {
     try std.testing.expectEqualStrings("Lost", displayResult("0-1", "white"));
     try std.testing.expectEqualStrings("Draw", displayResult("1/2-1/2", "white"));
     try std.testing.expectEqualStrings("In Progress", displayResult("*", "white"));
+}
+
+fn fakeKey(codepoint: u21, mods: vaxis.Key.Modifiers) vaxis.Key {
+    return .{ .codepoint = codepoint, .mods = mods };
+}
+
+test "history: delete asks first, confirms on Y, cancels on Esc (AE7/R8)" {
+    var list = std.ArrayList(storage.GameInfo).empty;
+    defer list.deinit(std.testing.allocator);
+    try list.append(std.testing.allocator, .{
+        .filename = "g.pgn",
+        .date = "2026-06-18",
+        .elo = 1500,
+        .player_color = "white",
+        .result = "*",
+        .is_finished = false,
+    });
+    var screen = HistoryScreen.init(list);
+
+    // Del opens the confirm; nothing is removed yet.
+    try std.testing.expectEqual(HistoryAction.none, screen.handleInput(fakeKey(vaxis.Key.delete, .{})));
+    try std.testing.expect(screen.delete_pending);
+
+    // Esc cancels: stays on the screen (not .back), no delete.
+    try std.testing.expectEqual(HistoryAction.none, screen.handleInput(fakeKey(vaxis.Key.escape, .{})));
+    try std.testing.expect(!screen.delete_pending);
+
+    // Del then Y confirms.
+    _ = screen.handleInput(fakeKey(vaxis.Key.delete, .{}));
+    try std.testing.expectEqual(HistoryAction.delete, screen.handleInput(fakeKey(vaxis.Key.enter, .{})));
 }
