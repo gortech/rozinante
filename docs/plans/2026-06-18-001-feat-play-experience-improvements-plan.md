@@ -1,7 +1,7 @@
 ---
 date: 2026-06-18
 type: feat
-status: active
+status: completed
 origin: docs/brainstorms/play-experience-improvements-requirements.md
 ---
 
