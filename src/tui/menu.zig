@@ -2,6 +2,7 @@ const vaxis = @import("vaxis");
 const Cell = vaxis.Cell;
 const Window = vaxis.Window;
 const renderer = @import("renderer.zig");
+const engine = @import("../engine.zig");
 const Theme = renderer.Theme;
 
 pub const PlayerColor = enum {
@@ -34,14 +35,14 @@ pub const PlayerColor = enum {
 };
 
 pub const GameConfig = struct {
-    elo: u16,
+    skill_level: u8,
     player_color: PlayerColor,
 };
 
 const ActiveField = enum {
     resume_game,
     game_history,
-    elo,
+    skill,
     color,
     start,
 };
@@ -56,15 +57,15 @@ pub const MenuAction = enum {
 };
 
 pub const Menu = struct {
-    selected_elo: u16 = 1500,
+    selected_skill: u8 = 0,
     selected_color: PlayerColor = .white,
-    active_field: ActiveField = .elo,
+    active_field: ActiveField = .skill,
     confirmed: bool = false,
     has_resume_game: bool = false,
 
-    const elo_min: u16 = 200;
-    const elo_max: u16 = 2800;
-    const elo_step: u16 = 100;
+    const skill_min: u8 = 0;
+    const skill_max: u8 = 20;
+    const skill_step: u8 = 1;
 
     pub fn handleInput(self: *Menu, key: vaxis.Key) MenuAction {
         if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true }))
@@ -74,8 +75,8 @@ pub const Menu = struct {
             self.active_field = switch (self.active_field) {
                 .resume_game => .resume_game,
                 .game_history => if (self.has_resume_game) .resume_game else .game_history,
-                .elo => .game_history,
-                .color => .elo,
+                .skill => .game_history,
+                .color => .skill,
                 .start => .color,
             };
             return .render;
@@ -84,8 +85,8 @@ pub const Menu = struct {
         if (key.matches(vaxis.Key.down, .{})) {
             self.active_field = switch (self.active_field) {
                 .resume_game => .game_history,
-                .game_history => .elo,
-                .elo => .color,
+                .game_history => .skill,
+                .skill => .color,
                 .color => .start,
                 .start => .start,
             };
@@ -94,9 +95,9 @@ pub const Menu = struct {
 
         if (key.matches(vaxis.Key.left, .{})) {
             switch (self.active_field) {
-                .elo => {
-                    if (self.selected_elo > elo_min)
-                        self.selected_elo -= elo_step;
+                .skill => {
+                    if (self.selected_skill > skill_min)
+                        self.selected_skill -= skill_step;
                 },
                 .color => {
                     self.selected_color = switch (self.selected_color) {
@@ -112,9 +113,9 @@ pub const Menu = struct {
 
         if (key.matches(vaxis.Key.right, .{})) {
             switch (self.active_field) {
-                .elo => {
-                    if (self.selected_elo < elo_max)
-                        self.selected_elo += elo_step;
+                .skill => {
+                    if (self.selected_skill < skill_max)
+                        self.selected_skill += skill_step;
                 },
                 .color => {
                     self.selected_color = switch (self.selected_color) {
@@ -136,7 +137,7 @@ pub const Menu = struct {
                 },
                 .resume_game => .resume_game,
                 .game_history => .game_history,
-                .elo, .color => .none,
+                .skill, .color => .none,
             };
         }
 
@@ -145,7 +146,7 @@ pub const Menu = struct {
 
     pub fn getConfig(self: *const Menu) GameConfig {
         return .{
-            .elo = self.selected_elo,
+            .skill_level = self.selected_skill,
             .player_color = self.selected_color,
         };
     }
@@ -166,7 +167,7 @@ pub const Menu = struct {
             return;
         }
 
-        const content_w: u16 = 30;
+        const content_w: u16 = 34;
         var item_count: u16 = 6; // title + elo + color + start + game_history + spacing
         if (self.has_resume_game) item_count += 1;
         const content_h: u16 = item_count * 2 + 3;
@@ -212,14 +213,21 @@ pub const Menu = struct {
         _ = renderer.writeStr(win, sub_x, y, subtitle, .{ .fg = Theme.text_primary, .bg = Theme.bg });
         y += 2;
 
-        // Elo selector
-        const elo_active = self.active_field == .elo;
-        const elo_style = fieldStyle(elo_active);
-        var col = renderer.writeStr(win, x0 + 2, y, "Elo Rating:  ", elo_style);
-        col = renderer.writeStr(win, col, y, "\xe2\x97\x80 ", elo_style);
-        col = renderer.writeNum(win, col, y, self.selected_elo, elo_style);
-        _ = renderer.writeStr(win, col, y, " \xe2\x96\xb6", elo_style);
-        if (elo_active) highlightRow(win, x0, y, content_w);
+        // Skill Level selector
+        const skill_active = self.active_field == .skill;
+        const skill_style = fieldStyle(skill_active);
+        var col = renderer.writeStr(win, x0 + 2, y, "Skill Level: ", skill_style);
+        col = renderer.writeStr(win, col, y, "\xe2\x97\x80 ", skill_style);
+        col = renderer.writeNum(win, col, y, self.selected_skill, skill_style);
+        col = renderer.writeStr(win, col, y, " \xe2\x96\xb6 ", skill_style);
+        if (self.selected_skill >= skill_max) {
+            _ = renderer.writeStr(win, col, y, "(Max)", skill_style);
+        } else {
+            col = renderer.writeStr(win, col, y, "(~Elo ", skill_style);
+            col = renderer.writeNum(win, col, y, engine.skillToElo(self.selected_skill), skill_style);
+            _ = renderer.writeStr(win, col, y, ")", skill_style);
+        }
+        if (skill_active) highlightRow(win, x0, y, content_w);
         y += 2;
 
         // Color selector
@@ -267,21 +275,21 @@ pub const Menu = struct {
     }
 };
 
-test "menu elo clamping" {
+test "menu skill clamping" {
     var m = Menu{};
-    m.selected_elo = Menu.elo_min;
+    m.selected_skill = Menu.skill_min;
     _ = m.handleInput(fakeKey(vaxis.Key.left, .{}));
-    try @import("std").testing.expectEqual(Menu.elo_min, m.selected_elo);
+    try @import("std").testing.expectEqual(Menu.skill_min, m.selected_skill);
 
-    m.selected_elo = Menu.elo_max;
+    m.selected_skill = Menu.skill_max;
     _ = m.handleInput(fakeKey(vaxis.Key.right, .{}));
-    try @import("std").testing.expectEqual(Menu.elo_max, m.selected_elo);
+    try @import("std").testing.expectEqual(Menu.skill_max, m.selected_skill);
 }
 
 test "menu navigation cycles fields" {
     var m = Menu{};
-    m.active_field = .elo;
-    try @import("std").testing.expectEqual(ActiveField.elo, m.active_field);
+    m.active_field = .skill;
+    try @import("std").testing.expectEqual(ActiveField.skill, m.active_field);
 
     _ = m.handleInput(fakeKey(vaxis.Key.down, .{}));
     try @import("std").testing.expectEqual(ActiveField.color, m.active_field);
@@ -327,10 +335,10 @@ test "menu color cycling" {
 
 test "menu getConfig returns selected values" {
     var m = Menu{};
-    m.selected_elo = 2000;
+    m.selected_skill = 12;
     m.selected_color = .black;
     const config = m.getConfig();
-    try @import("std").testing.expectEqual(@as(u16, 2000), config.elo);
+    try @import("std").testing.expectEqual(@as(u8, 12), config.skill_level);
     try @import("std").testing.expectEqual(PlayerColor.black, config.player_color);
 }
 
@@ -343,7 +351,7 @@ test "menu resume game navigation" {
     try @import("std").testing.expectEqual(ActiveField.game_history, m.active_field);
 
     _ = m.handleInput(fakeKey(vaxis.Key.down, .{}));
-    try @import("std").testing.expectEqual(ActiveField.elo, m.active_field);
+    try @import("std").testing.expectEqual(ActiveField.skill, m.active_field);
 
     _ = m.handleInput(fakeKey(vaxis.Key.up, .{}));
     try @import("std").testing.expectEqual(ActiveField.game_history, m.active_field);

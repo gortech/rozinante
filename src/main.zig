@@ -536,7 +536,7 @@ pub fn main(init: std.process.Init) !void {
     main_loop: while (true) {
         // --- Crash recovery: scan for unfinished games ---
         var resume_filepath: ?[]const u8 = null;
-        var resume_elo: u16 = prefs.default_elo;
+        var resume_elo: u16 = engine_mod.skillToElo(prefs.default_skill_level);
         var resume_color: chess.Color = .white;
 
         if (data_dir) |dd| {
@@ -558,7 +558,7 @@ pub fn main(init: std.process.Init) !void {
 
         // --- Menu phase ---
         var menu_state = Menu{};
-        menu_state.selected_elo = prefs.default_elo;
+        menu_state.selected_skill = prefs.default_skill_level;
         menu_state.selected_color = PlayerColor.fromString(prefs.default_color);
         menu_state.has_resume_game = resume_filepath != null;
         menu_state.initActiveField();
@@ -593,13 +593,13 @@ pub fn main(init: std.process.Init) !void {
                                     // Parse the selected game to extract elo and color for resume
                                     const basename = if (std.mem.lastIndexOfScalar(u8, fp, '/')) |idx| fp[idx + 1 ..] else fp;
                                     resume_filepath = fp;
-                                    resume_elo = prefs.default_elo;
+                                    resume_elo = engine_mod.skillToElo(prefs.default_skill_level);
                                     resume_color = .white;
                                     // Extract elo and color from filename
                                     if (std.mem.indexOf(u8, basename, "_elo")) |elo_start| {
                                         const after_elo = basename[elo_start + 4 ..];
                                         if (std.mem.indexOf(u8, after_elo, "_s")) |color_sep| {
-                                            resume_elo = std.fmt.parseInt(u16, after_elo[0..color_sep], 10) catch prefs.default_elo;
+                                            resume_elo = std.fmt.parseInt(u16, after_elo[0..color_sep], 10) catch engine_mod.skillToElo(prefs.default_skill_level);
                                             const color_part = after_elo[color_sep + 2 ..];
                                             const color_end = std.mem.indexOf(u8, color_part, ".") orelse color_part.len;
                                             if (std.mem.eql(u8, color_part[0..color_end], "black")) {
@@ -631,8 +631,8 @@ pub fn main(init: std.process.Init) !void {
         if (menu_action == .start) {
             const menu_config = menu_state.getConfig();
             const menu_color_str = menu_config.player_color.toString();
-            if (menu_config.elo != prefs.default_elo or !std.mem.eql(u8, menu_color_str, prefs.default_color)) {
-                prefs.default_elo = menu_config.elo;
+            if (menu_config.skill_level != prefs.default_skill_level or !std.mem.eql(u8, menu_color_str, prefs.default_color)) {
+                prefs.default_skill_level = menu_config.skill_level;
                 prefs.default_color = menu_color_str;
                 if (config_dir) |cd| config.savePreferences(alloc, io, prefs, cd) catch {};
             }
@@ -650,6 +650,7 @@ pub fn main(init: std.process.Init) !void {
 
         var game_state: Game = undefined;
         var game_elo: u16 = undefined;
+        var game_skill: u8 = undefined;
         var player_color: chess.Color = undefined;
         var current_save_path: ?[]const u8 = null;
         var game_start_secs: i64 = undefined;
@@ -668,6 +669,7 @@ pub fn main(init: std.process.Init) !void {
             };
 
             game_elo = resume_elo;
+            game_skill = engine_mod.eloToSkill(resume_elo);
             player_color = resume_color;
             current_save_path = filepath;
 
@@ -680,7 +682,7 @@ pub fn main(init: std.process.Init) !void {
             // Extract date from filename for continued saves
             game_start_secs = @intCast(@divTrunc(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
 
-            current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
+            current_engine = engine_mod.Engine.init(io, stockfish_path, game_skill) catch {
                 continue :main_loop;
             };
             if (current_engine) |*eng| eng.relocate();
@@ -689,9 +691,10 @@ pub fn main(init: std.process.Init) !void {
         } else {
             // --- New game flow ---
             const game_config = menu_state.getConfig();
-            game_elo = game_config.elo;
+            game_skill = game_config.skill_level;
+            game_elo = engine_mod.skillToElo(game_skill);
 
-            current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
+            current_engine = engine_mod.Engine.init(io, stockfish_path, game_skill) catch {
                 continue :main_loop;
             };
             if (current_engine) |*eng| eng.relocate();

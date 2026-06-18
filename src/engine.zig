@@ -25,7 +25,7 @@ pub const Analysis = struct {
 pub const Engine = struct {
     child: process.Child,
     io: Io,
-    elo: u16,
+    skill: u8,
     is_ready: bool,
     stockfish_path: []const u8,
 
@@ -34,7 +34,7 @@ pub const Engine = struct {
     stdin_writer: File.Writer,
     stdout_reader: File.Reader,
 
-    pub fn init(io: Io, stockfish_path: []const u8, elo: u16) !Engine {
+    pub fn init(io: Io, stockfish_path: []const u8, skill: u8) !Engine {
         const child = try process.spawn(io, .{
             .argv = &.{stockfish_path},
             .stdin = .pipe,
@@ -45,7 +45,7 @@ pub const Engine = struct {
         var engine = Engine{
             .child = child,
             .io = io,
-            .elo = elo,
+            .skill = skill,
             .is_ready = false,
             .stockfish_path = stockfish_path,
             .stdin_buf = undefined,
@@ -59,7 +59,7 @@ pub const Engine = struct {
 
         try engine.uciHandshake();
 
-        log.info("engine initialized: path={s} elo={d}", .{ stockfish_path, elo });
+        log.info("engine initialized: path={s} skill={d}", .{ stockfish_path, skill });
 
         return engine;
     }
@@ -82,11 +82,9 @@ pub const Engine = struct {
         try self.sendCommand("uci");
         try self.readUntilToken("uciok");
 
-        try self.sendCommand("setoption name UCI_LimitStrength value true");
-
-        var elo_val_buf: [64]u8 = undefined;
-        const elo_val_cmd = std.fmt.bufPrint(&elo_val_buf, "setoption name UCI_Elo value {d}", .{self.elo}) catch unreachable;
-        try self.sendCommand(elo_val_cmd);
+        var skill_buf: [64]u8 = undefined;
+        const skill_cmd = std.fmt.bufPrint(&skill_buf, "setoption name Skill Level value {d}", .{self.skill}) catch unreachable;
+        try self.sendCommand(skill_cmd);
 
         try self.waitReady();
     }
@@ -137,8 +135,9 @@ pub const Engine = struct {
             return EngineError.InvalidUciResponse;
         try self.sendCommand(pos_cmd);
 
+        const elo = skillToElo(self.skill);
         var go_buf: [64]u8 = undefined;
-        const go_cmd = std.fmt.bufPrint(&go_buf, "go depth {d} movetime {d}", .{ eloToDepth(self.elo), eloToMovetime(self.elo) }) catch
+        const go_cmd = std.fmt.bufPrint(&go_buf, "go depth {d} movetime {d}", .{ eloToDepth(elo), eloToMovetime(elo) }) catch
             return EngineError.InvalidUciResponse;
         try self.sendCommand(go_cmd);
 
@@ -320,6 +319,32 @@ pub fn eloToMovetime(elo: u16) u16 {
     return 12000;
 }
 
+// Skill Level (0..20) <-> approximate CCRL Elo. Skill Level (not UCI_Elo) is the
+// strength lever Stockfish exposes; UCI_Elo floors at ~1320, so the genuine-beginner
+// floor is added app-side (see the move handicap). The Elo here is shown beside the
+// dial and written to the save filename, and feeds eloToDepth/eloToMovetime.
+const skill_elo_table = [_]u16{
+    1320, 1418, 1517, 1615, 1714, 1812, 1911, 2009, 2108, 2206,
+    2305, 2403, 2502, 2600, 2698, 2797, 2895, 2994, 3092, 3191, 3500,
+};
+
+pub fn skillToElo(skill: u8) u16 {
+    return skill_elo_table[@min(skill, 20)];
+}
+
+pub fn eloToSkill(elo: u16) u8 {
+    var best: u8 = 0;
+    var best_diff: u32 = std.math.maxInt(u32);
+    for (skill_elo_table, 0..) |e, s| {
+        const diff: u32 = if (e > elo) e - elo else elo - e;
+        if (diff < best_diff) {
+            best_diff = diff;
+            best = @intCast(s);
+        }
+    }
+    return best;
+}
+
 // --- Tests ---
 
 test "parseBestMove: standard move" {
@@ -407,6 +432,35 @@ test "eloToMovetime: at 2800 returns 12000ms" {
 
 test "eloToMovetime: at 1000 returns 120ms" {
     try std.testing.expectEqual(@as(u16, 120), eloToMovetime(1000));
+}
+
+test "skillToElo: floor, ceiling, and clamp" {
+    try std.testing.expectEqual(@as(u16, 1320), skillToElo(0));
+    try std.testing.expectEqual(@as(u16, 3500), skillToElo(20));
+    try std.testing.expectEqual(@as(u16, 3500), skillToElo(99));
+}
+
+test "skillToElo: monotonically non-decreasing" {
+    var prev: u16 = 0;
+    var s: u8 = 0;
+    while (s <= 20) : (s += 1) {
+        const e = skillToElo(s);
+        try std.testing.expect(e >= prev);
+        prev = e;
+    }
+}
+
+test "eloToSkill: anchors and legacy clamp" {
+    try std.testing.expectEqual(@as(u8, 0), eloToSkill(1320));
+    try std.testing.expectEqual(@as(u8, 0), eloToSkill(1200));
+    try std.testing.expectEqual(@as(u8, 20), eloToSkill(3500));
+}
+
+test "eloToSkill: round-trips skillToElo" {
+    var s: u8 = 0;
+    while (s <= 20) : (s += 1) {
+        try std.testing.expectEqual(s, eloToSkill(skillToElo(s)));
+    }
 }
 
 test "Move.fromUci: promotion round-trip" {
