@@ -339,7 +339,8 @@ pub fn eloToMovetime(elo: u16) u16 {
 // dial and written to the save filename, and feeds eloToDepth/eloToMovetime.
 const skill_elo_table = [_]u16{
     1320, 1418, 1517, 1615, 1714, 1812, 1911, 2009, 2108, 2206,
-    2305, 2403, 2502, 2600, 2698, 2797, 2895, 2994, 3092, 3191, 3500,
+    2305, 2403, 2502, 2600, 2698, 2797, 2895, 2994, 3092, 3191,
+    3500,
 };
 
 pub fn skillToElo(skill: u8) u16 {
