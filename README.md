@@ -8,11 +8,14 @@ A terminal chess game where you play [Stockfish](https://stockfishchess.org/) at
 
 ## Features
 
-- **Play Stockfish at a chosen Elo** — pick the engine's strength and your color (white, black, or random) from the menu.
+- **Play Stockfish at a chosen difficulty** — a single Skill Level dial spanning genuine-beginner (with an app-side move handicap below Stockfish's rating floor) to full strength; pick your color (white, black, or random) from the menu.
 - **Learning aids, toggled mid-game** — highlight your pieces currently under attack and show Stockfish's suggested best move, on demand.
 - **Opening identification** — names the opening from an embedded Lichess ECO book (3690 lines).
 - **Full chess rules** — castling, en passant, promotion, check/checkmate/stalemate, and the fifty-move rule. (Threefold repetition is not detected yet.)
 - **Save, browse, and replay** — games are written to PGN; a history browser lets you reopen past games and step through them move by move.
+- **Take back moves** — press U on your turn to undo a move-pair, repeatable to the start of the game; the saved PGN rewrites to match.
+- **Selectable board themes** — Classic, Wood, Green, and Blue full palettes, chosen in the menu with live preview and remembered across sessions.
+- **Confirmation prompts** — quitting or leaving a game in progress, and deleting a saved game, ask first.
 
 ## Requirements
 
