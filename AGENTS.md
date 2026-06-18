@@ -6,8 +6,8 @@ Terminal chess learning game in Zig: play Stockfish at a chosen Elo with togglab
 
 - `zig build` — compile the `rozinante` executable
 - `zig build run` — build and run
-- `zig build test` — all tests (module + executable passes, run in parallel); 216 currently pass
-- `zig build preview` — piece sprite preview
+- `zig build test` — all tests (module + executable passes, run in parallel); 242 currently pass
+- `zig build preview` — piece sprite preview and the highlight-mark gallery (every state, combo, light/dark, with/without a piece, plus a legend; needs a terminal at least ~104×64)
 
 ## Stack
 

@@ -123,8 +123,8 @@ fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Eng
     event_loop.postEvent(.engine_analysis_ready) catch {};
 }
 
-const MIN_W: u16 = 94;
-const MIN_H: u16 = 33;
+const MIN_W: u16 = 118;
+const MIN_H: u16 = 49;
 
 fn fits(width: u16, height: u16) bool {
     return width >= MIN_W and height >= MIN_H;

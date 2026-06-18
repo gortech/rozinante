@@ -5,3 +5,7 @@ pub const sprites = @import("tui/sprites.zig");
 pub const menu = @import("tui/menu.zig");
 pub const history = @import("tui/history.zig");
 pub const viewer = @import("tui/viewer.zig");
+
+test {
+    @import("std").testing.refAllDecls(@This());
+}
