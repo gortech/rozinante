@@ -566,6 +566,11 @@ pub fn main(init: std.process.Init) !void {
         // --- Menu phase ---
         var menu_state = Menu{};
         menu_state.selected_skill = prefs.default_skill_level;
+        menu_state.selected_theme = renderer.ThemeId.fromString(prefs.theme);
+        // Apply the palette per menu-entry (not once before the loop) so the global
+        // palette always matches the freshly-initialized selector, re-normalizing a
+        // previewed-but-unstarted theme on the next menu entry.
+        renderer.Theme = renderer.palette(menu_state.selected_theme);
         menu_state.selected_color = PlayerColor.fromString(prefs.default_color);
         menu_state.has_resume_game = resume_filepath != null;
         menu_state.initActiveField();
@@ -638,9 +643,11 @@ pub fn main(init: std.process.Init) !void {
         if (menu_action == .start) {
             const menu_config = menu_state.getConfig();
             const menu_color_str = menu_config.player_color.toString();
-            if (menu_config.skill_level != prefs.default_skill_level or !std.mem.eql(u8, menu_color_str, prefs.default_color)) {
+            const menu_theme_str = menu_config.theme_id.toString();
+            if (menu_config.skill_level != prefs.default_skill_level or !std.mem.eql(u8, menu_color_str, prefs.default_color) or !std.mem.eql(u8, menu_theme_str, prefs.theme)) {
                 prefs.default_skill_level = menu_config.skill_level;
                 prefs.default_color = menu_color_str;
+                prefs.theme = menu_theme_str;
                 if (config_dir) |cd| config.savePreferences(alloc, io, prefs, cd) catch {};
             }
         }

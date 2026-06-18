@@ -3,7 +3,7 @@ const Cell = vaxis.Cell;
 const Window = vaxis.Window;
 const renderer = @import("renderer.zig");
 const engine = @import("../engine.zig");
-const Theme = renderer.Theme;
+const Theme = &renderer.Theme;
 
 pub const PlayerColor = enum {
     white,
@@ -37,6 +37,7 @@ pub const PlayerColor = enum {
 pub const GameConfig = struct {
     skill_level: u8,
     player_color: PlayerColor,
+    theme_id: renderer.ThemeId,
 };
 
 const ActiveField = enum {
@@ -44,6 +45,7 @@ const ActiveField = enum {
     game_history,
     skill,
     color,
+    theme,
     start,
 };
 
@@ -59,6 +61,7 @@ pub const MenuAction = enum {
 pub const Menu = struct {
     selected_skill: u8 = 0,
     selected_color: PlayerColor = .white,
+    selected_theme: renderer.ThemeId = .classic,
     active_field: ActiveField = .skill,
     confirmed: bool = false,
     has_resume_game: bool = false,
@@ -77,7 +80,8 @@ pub const Menu = struct {
                 .game_history => if (self.has_resume_game) .resume_game else .game_history,
                 .skill => .game_history,
                 .color => .skill,
-                .start => .color,
+                .theme => .color,
+                .start => .theme,
             };
             return .render;
         }
@@ -87,7 +91,8 @@ pub const Menu = struct {
                 .resume_game => .game_history,
                 .game_history => .skill,
                 .skill => .color,
-                .color => .start,
+                .color => .theme,
+                .theme => .start,
                 .start => .start,
             };
             return .render;
@@ -105,6 +110,15 @@ pub const Menu = struct {
                         .black => .white,
                         .random => .black,
                     };
+                },
+                .theme => {
+                    self.selected_theme = switch (self.selected_theme) {
+                        .classic => .blue,
+                        .wood => .classic,
+                        .green => .wood,
+                        .blue => .green,
+                    };
+                    renderer.Theme = renderer.palette(self.selected_theme);
                 },
                 .resume_game, .game_history, .start => {},
             }
@@ -124,6 +138,15 @@ pub const Menu = struct {
                         .random => .white,
                     };
                 },
+                .theme => {
+                    self.selected_theme = switch (self.selected_theme) {
+                        .classic => .wood,
+                        .wood => .green,
+                        .green => .blue,
+                        .blue => .classic,
+                    };
+                    renderer.Theme = renderer.palette(self.selected_theme);
+                },
                 .resume_game, .game_history, .start => {},
             }
             return .render;
@@ -137,7 +160,7 @@ pub const Menu = struct {
                 },
                 .resume_game => .resume_game,
                 .game_history => .game_history,
-                .skill, .color => .none,
+                .skill, .color, .theme => .none,
             };
         }
 
@@ -148,6 +171,7 @@ pub const Menu = struct {
         return .{
             .skill_level = self.selected_skill,
             .player_color = self.selected_color,
+            .theme_id = self.selected_theme,
         };
     }
 
@@ -168,7 +192,7 @@ pub const Menu = struct {
         }
 
         const content_w: u16 = 34;
-        var item_count: u16 = 6; // title + elo + color + start + game_history + spacing
+        var item_count: u16 = 7; // title + skill + color + theme + start + game_history + spacing
         if (self.has_resume_game) item_count += 1;
         const content_h: u16 = item_count * 2 + 3;
         const x0: u16 = if (win.width > content_w) (win.width - content_w) / 2 else 0;
@@ -240,6 +264,16 @@ pub const Menu = struct {
         if (color_active) highlightRow(win, x0, y, content_w);
         y += 2;
 
+        // Theme selector
+        const theme_active = self.active_field == .theme;
+        const theme_style = fieldStyle(theme_active);
+        col = renderer.writeStr(win, x0 + 2, y, "Theme:       ", theme_style);
+        col = renderer.writeStr(win, col, y, "\xe2\x97\x80 ", theme_style);
+        col = renderer.writeStr(win, col, y, self.selected_theme.label(), theme_style);
+        _ = renderer.writeStr(win, col, y, " \xe2\x96\xb6", theme_style);
+        if (theme_active) highlightRow(win, x0, y, content_w);
+        y += 2;
+
         // Start button
         const start_active = self.active_field == .start;
         const btn_label = "[ Start Game ]";
@@ -269,7 +303,7 @@ pub const Menu = struct {
         var i: u16 = x;
         while (i < x + w and i < win.width) : (i += 1) {
             var cell = win.readCell(i, y) orelse continue;
-            cell.style.bg = .{ .rgb = .{ 40, 30, 70 } };
+            cell.style.bg = Theme.selection_bg;
             win.writeCell(i, y, cell);
         }
     }
@@ -295,13 +329,16 @@ test "menu navigation cycles fields" {
     try @import("std").testing.expectEqual(ActiveField.color, m.active_field);
 
     _ = m.handleInput(fakeKey(vaxis.Key.down, .{}));
+    try @import("std").testing.expectEqual(ActiveField.theme, m.active_field);
+
+    _ = m.handleInput(fakeKey(vaxis.Key.down, .{}));
     try @import("std").testing.expectEqual(ActiveField.start, m.active_field);
 
     _ = m.handleInput(fakeKey(vaxis.Key.down, .{}));
     try @import("std").testing.expectEqual(ActiveField.start, m.active_field);
 
     _ = m.handleInput(fakeKey(vaxis.Key.up, .{}));
-    try @import("std").testing.expectEqual(ActiveField.color, m.active_field);
+    try @import("std").testing.expectEqual(ActiveField.theme, m.active_field);
 }
 
 test "menu enter on start returns start action" {
@@ -401,4 +438,28 @@ fn fakeKey(codepoint: u21, mods: vaxis.Key.Modifiers) vaxis.Key {
         .codepoint = codepoint,
         .mods = mods,
     };
+}
+
+test "menu theme cycling wraps both directions" {
+    var m = Menu{};
+    m.active_field = .theme;
+    try @import("std").testing.expectEqual(renderer.ThemeId.classic, m.selected_theme);
+
+    _ = m.handleInput(fakeKey(vaxis.Key.right, .{}));
+    try @import("std").testing.expectEqual(renderer.ThemeId.wood, m.selected_theme);
+    _ = m.handleInput(fakeKey(vaxis.Key.right, .{}));
+    try @import("std").testing.expectEqual(renderer.ThemeId.green, m.selected_theme);
+    _ = m.handleInput(fakeKey(vaxis.Key.right, .{}));
+    try @import("std").testing.expectEqual(renderer.ThemeId.blue, m.selected_theme);
+    _ = m.handleInput(fakeKey(vaxis.Key.right, .{}));
+    try @import("std").testing.expectEqual(renderer.ThemeId.classic, m.selected_theme);
+
+    _ = m.handleInput(fakeKey(vaxis.Key.left, .{}));
+    try @import("std").testing.expectEqual(renderer.ThemeId.blue, m.selected_theme);
+}
+
+test "menu getConfig carries the selected theme (AE10)" {
+    var m = Menu{};
+    m.selected_theme = .green;
+    try @import("std").testing.expectEqual(renderer.ThemeId.green, m.getConfig().theme_id);
 }

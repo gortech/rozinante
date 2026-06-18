@@ -3,7 +3,7 @@ const vaxis = @import("vaxis");
 const renderer = @import("renderer.zig");
 const storage = @import("../persistence/storage.zig");
 
-const Theme = renderer.Theme;
+const Theme = &renderer.Theme;
 const Window = vaxis.Window;
 
 pub const HistoryAction = enum {
@@ -119,7 +119,7 @@ pub const HistoryScreen = struct {
                 const idx = scroll + i;
                 const g = self.games.items[idx];
                 const is_selected = idx == cursor;
-                const row_bg: vaxis.Cell.Color = if (is_selected) .{ .rgb = .{ 40, 30, 70 } } else Theme.bg;
+                const row_bg: vaxis.Cell.Color = if (is_selected) Theme.selection_bg else Theme.bg;
                 const fg: vaxis.Cell.Color = if (is_selected) Theme.text_primary else Theme.text_dim;
                 const style: vaxis.Cell.Style = .{ .fg = fg, .bg = row_bg };
 

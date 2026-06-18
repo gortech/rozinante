@@ -4,7 +4,7 @@ const chess = @import("../chess.zig");
 const renderer = @import("renderer.zig");
 const pgn = @import("../persistence/pgn.zig");
 
-const Theme = renderer.Theme;
+const Theme = &renderer.Theme;
 const Window = vaxis.Window;
 
 pub const ViewerAction = enum {

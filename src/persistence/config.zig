@@ -10,6 +10,7 @@ pub const Preferences = struct {
     stockfish_path: ?[]const u8 = null,
     default_skill_level: u8 = 0,
     default_color: []const u8 = "white",
+    theme: []const u8 = "classic",
     default_time_control: u16 = 0,
 };
 
@@ -49,6 +50,7 @@ pub fn loadPreferences(allocator: Allocator, io: Io, config_dir: []const u8) Pre
             null,
         .default_skill_level = skill,
         .default_color = allocator.dupe(u8, parsed.value.default_color) catch "white",
+        .theme = allocator.dupe(u8, parsed.value.theme) catch "classic",
         .default_time_control = parsed.value.default_time_control,
     };
 }
@@ -64,6 +66,7 @@ pub fn savePreferences(allocator: Allocator, io: Io, prefs: Preferences, config_
         .stockfish_path = prefs.stockfish_path,
         .default_skill_level = prefs.default_skill_level,
         .default_color = prefs.default_color,
+        .theme = prefs.theme,
         .default_time_control = prefs.default_time_control,
     };
 
@@ -88,6 +91,7 @@ const JsonPreferences = struct {
     default_elo: ?u16 = null,
     default_skill_level: ?u8 = null,
     default_color: []const u8 = "white",
+    theme: []const u8 = "classic",
     default_time_control: u16 = 0,
 };
 
@@ -200,4 +204,22 @@ test "preferences clamps out-of-range persisted skill" {
 
     const prefs = loadPreferences(allocator, io, tmp_dir);
     try std.testing.expect(prefs.default_skill_level <= 20);
+}
+
+test "preferences round-trips theme (AE10)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = getTestIo();
+
+    const tmp_dir = "/tmp/rozinante-test-theme-config";
+    Dir.cwd().createDirPath(io, tmp_dir) catch {};
+    defer {
+        Dir.cwd().deleteFile(io, tmp_dir ++ "/config.json") catch {};
+        Dir.cwd().deleteFile(io, tmp_dir) catch {};
+    }
+
+    try savePreferences(allocator, io, .{ .theme = "wood" }, tmp_dir);
+    const loaded = loadPreferences(allocator, io, tmp_dir);
+    try std.testing.expectEqualStrings("wood", loaded.theme);
 }
