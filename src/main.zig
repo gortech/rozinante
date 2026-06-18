@@ -579,6 +579,11 @@ pub fn main(init: std.process.Init) !void {
         var menu_action: MenuAction = .none;
 
         while (!menu_done) {
+            const win = vx.window();
+            win.clear();
+            menu_state.render(win);
+            try vx.render(tty.writer());
+
             const event = try loop.nextEvent();
             switch (event) {
                 .key_press => |key| {
@@ -632,11 +637,6 @@ pub fn main(init: std.process.Init) !void {
                 },
                 else => {},
             }
-
-            const win = vx.window();
-            win.clear();
-            menu_state.render(win);
-            try vx.render(tty.writer());
         }
 
         // --- Save preferences if changed ---
