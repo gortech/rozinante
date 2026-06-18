@@ -1,3 +1,4 @@
+const std = @import("std");
 const vaxis = @import("vaxis");
 const Cell = vaxis.Cell;
 const Color = Cell.Color;
@@ -26,9 +27,14 @@ pub const Theme = struct {
     pub const highlight_hint_best: Color = .{ .rgb = .{ 50, 200, 100 } };
 };
 
+// drawMarks is hand-fitted to exactly this cell geometry; the RenderOptions
+// defaults and the drawMarks guard both reference it so they cannot drift apart.
+const min_cell_w: u16 = 12;
+const min_cell_h: u16 = 6;
+
 pub const RenderOptions = struct {
-    cell_w: u16 = 9,
-    cell_h: u16 = 4,
+    cell_w: u16 = min_cell_w,
+    cell_h: u16 = min_cell_h,
     label_w: u16 = 2,
     label_h: u16 = 1,
     show_labels: bool = true,
@@ -52,45 +58,193 @@ fn boardSquare(display_row: u3, display_col: u3, flipped: bool) u6 {
     return @as(u6, rank) * 8 + @as(u6, file);
 }
 
-fn squareHighlight(game: *const Game, sq_idx: u6) ?Color {
-    if (game.flash_square) |fs| {
-        if (fs.toIndex() == sq_idx and game.flash_timer > 0)
-            return Theme.highlight_flash;
-    }
+pub const BorderStyle = enum { selected, capture, check, flash, engine };
 
-    if (game.engine_last_move) |em| {
-        if (em.from.toIndex() == sq_idx or em.to.toIndex() == sq_idx)
-            return Theme.highlight_engine_move;
-    }
+pub const Marks = struct {
+    border: ?BorderStyle = null,
+    cursor: bool = false,
+    endangered: bool = false,
+    best_move: bool = false,
+    center: bool = false,
+};
 
-    if (game.cursor.toIndex() == sq_idx)
-        return Theme.highlight_cursor;
+/// Border family is single-winner: the inner-column bars can only show one
+/// style, resolved by precedence check > flash > selected > capture > engine.
+fn resolveBorder(check: bool, flash: bool, selected: bool, capture: bool, engine: bool) ?BorderStyle {
+    if (check) return .check;
+    if (flash) return .flash;
+    if (selected) return .selected;
+    if (capture) return .capture;
+    if (engine) return .engine;
+    return null;
+}
 
-    if (game.selected) |sel| {
-        if (sel.toIndex() == sq_idx)
-            return Theme.highlight_selected;
-    }
+/// Pure mapping from game state to the marks for one square. Corner and center
+/// marks compose freely; only the border family is single-winner.
+pub fn squareMarks(game: *const Game, sq_idx: u6) Marks {
+    const flash = if (game.flash_square) |fs|
+        fs.toIndex() == sq_idx and game.flash_timer > 0
+    else
+        false;
 
-    if (game.legal_targets[sq_idx])
-        return Theme.highlight_legal;
+    const engine = if (game.engine_last_move) |em|
+        em.from.toIndex() == sq_idx or em.to.toIndex() == sq_idx
+    else
+        false;
 
-    if (game.isKingInCheck()) {
-        if (game.activeKingSquare()) |king_sq| {
-            if (king_sq.toIndex() == sq_idx)
-                return Theme.highlight_check;
-        }
-    }
+    const selected = if (game.selected) |sel| sel.toIndex() == sq_idx else false;
+
+    const check = game.isKingInCheck() and
+        (if (game.activeKingSquare()) |ks| ks.toIndex() == sq_idx else false);
+
+    const is_target = game.legal_targets[sq_idx];
+    const occupied = game.board.squares[sq_idx] != .empty;
+
+    var marks: Marks = .{};
+    marks.border = resolveBorder(check, flash, selected, is_target and occupied, engine);
+    marks.center = is_target and !occupied;
+    marks.cursor = game.cursor.toIndex() == sq_idx;
 
     if (game.hints_enabled) {
-        if (game.hint_best_move) |bm| {
-            if (bm.from.toIndex() == sq_idx or bm.to.toIndex() == sq_idx)
-                return Theme.highlight_hint_best;
-        }
-        if (game.hint_endangered[sq_idx])
-            return Theme.highlight_endangered;
+        marks.endangered = game.hint_endangered[sq_idx];
+        if (game.hint_best_move) |bm|
+            marks.best_move = bm.from.toIndex() == sq_idx or bm.to.toIndex() == sq_idx;
     }
 
-    return null;
+    return marks;
+}
+
+fn borderColor(style: BorderStyle) Color {
+    return switch (style) {
+        .selected => Theme.highlight_selected,
+        .capture => Theme.highlight_legal,
+        .check => Theme.highlight_check,
+        .flash => Theme.highlight_flash,
+        .engine => Theme.highlight_engine_move,
+    };
+}
+
+fn putCell(win: Window, x: u16, y: u16, glyph: []const u8, fg: Color, bg: Color) void {
+    win.writeCell(x, y, .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = .{ .fg = fg, .bg = bg } });
+}
+
+/// Fill the inclusive horizontal run x0..x1 on row y with one glyph.
+fn hRun(win: Window, x0: u16, x1: u16, y: u16, glyph: []const u8, fg: Color, bg: Color) void {
+    var x = x0;
+    while (x <= x1) : (x += 1) putCell(win, x, y, glyph, fg, bg);
+}
+
+/// Fill the inclusive vertical run y0..y1 on column x with one glyph.
+fn vRun(win: Window, x: u16, y0: u16, y1: u16, glyph: []const u8, fg: Color, bg: Color) void {
+    var y = y0;
+    while (y <= y1) : (y += 1) putCell(win, x, y, glyph, fg, bg);
+}
+
+// Thick block glyphs: top edges use the upper half (top-aligned), bottom edges
+// the lower half (bottom-aligned), sides and fills the full block.
+const UPPER = "▀";
+const LOWER = "▄";
+const FULL = "█";
+
+const OutlineLevel = struct {
+    tl: []const u8,
+    tr: []const u8,
+    bl: []const u8,
+    br: []const u8,
+    top: []const u8,
+    bottom: []const u8,
+    left: []const u8,
+    right: []const u8,
+    inner_left: ?[]const u8 = null,
+    inner_right: ?[]const u8 = null,
+};
+
+// Outline weight encodes border importance (see borderLevel). Thin = quarter
+// edges (🮂/▂) + 3-quadrant corners (▛▜▙▟) that cleanly join the half-block
+// sides; thick = half edges + full sides; solid = a 2-cell-thick full frame.
+const level_thin = OutlineLevel{ .tl = "▛", .tr = "▜", .bl = "▙", .br = "▟", .top = "🮂", .bottom = "▂", .left = "▌", .right = "▐" };
+const level_thick = OutlineLevel{ .tl = "█", .tr = "█", .bl = "█", .br = "█", .top = "▀", .bottom = "▄", .left = "█", .right = "█" };
+const level_solid = OutlineLevel{ .tl = "█", .tr = "█", .bl = "█", .br = "█", .top = "█", .bottom = "█", .left = "█", .right = "█", .inner_left = "█", .inner_right = "█" };
+
+fn borderLevel(style: BorderStyle) OutlineLevel {
+    return switch (style) {
+        .check, .flash => level_solid,
+        .selected => level_thick,
+        .capture, .engine => level_thin,
+    };
+}
+
+fn drawOutline(win: Window, cx: u16, ry: u16, opts: RenderOptions, lv: OutlineLevel, c: Color, base: Color) void {
+    const left = cx;
+    const right = cx + opts.cell_w - 1;
+    const top = ry;
+    const bottom = ry + opts.cell_h - 1;
+    putCell(win, left, top, lv.tl, c, base);
+    putCell(win, right, top, lv.tr, c, base);
+    putCell(win, left, bottom, lv.bl, c, base);
+    putCell(win, right, bottom, lv.br, c, base);
+    hRun(win, left + 1, right - 1, top, lv.top, c, base);
+    hRun(win, left + 1, right - 1, bottom, lv.bottom, c, base);
+    var y = top + 1;
+    while (y < bottom) : (y += 1) {
+        putCell(win, left, y, lv.left, c, base);
+        putCell(win, right, y, lv.right, c, base);
+        if (lv.inner_left) |g| putCell(win, left + 1, y, g, c, base);
+        if (lv.inner_right) |g| putCell(win, right - 1, y, g, c, base);
+    }
+}
+
+/// Overlay marks onto an already-drawn base + sprite. Pure: the same routine
+/// drives the live board and the gallery, so what a developer judges is what
+/// ships. Layers compose top-to-bottom; only the border outline is single-winner.
+/// Geometry assumes the 12x6 cell — even dims have no single middle cell, so
+/// centered marks span the two straddling rows/cols.
+pub fn drawMarks(win: Window, cx: u16, ry: u16, opts: RenderOptions, marks: Marks, base: Color) void {
+    // Hand-fitted to the min_cell_w x min_cell_h (12x6) cell — a 6x4
+    // sprite centered with a 3-col horizontal / 1-row vertical margin. The only
+    // live caller renders at exactly that size; smaller windows show the resize
+    // message, so below it we draw nothing.
+    if (opts.cell_w < min_cell_w or opts.cell_h < min_cell_h) return;
+
+    const left = cx;
+    const right = cx + opts.cell_w - 1;
+    const top = ry;
+    const bottom = ry + opts.cell_h - 1;
+    const col_a = cx + opts.cell_w / 2 - 1; // left of the two center columns
+    const col_b = cx + opts.cell_w / 2; // right of the two center columns
+    const row_a = ry + opts.cell_h / 2 - 1; // upper of the two center rows
+    const row_b = ry + opts.cell_h / 2; // lower of the two center rows
+
+    // Layer 1: border outline (single winner). Weight encodes importance
+    // (borderLevel), hue encodes state (borderColor).
+    if (marks.border) |style|
+        drawOutline(win, cx, ry, opts, borderLevel(style), borderColor(style), base);
+
+    // Layer 2: legal empty-target dot — four quadrant blocks meeting at the
+    // exact cell center form a centered square (empty squares only).
+    if (marks.center) {
+        const c = Theme.highlight_legal;
+        putCell(win, col_a, row_a, LOWER, c, base);
+        putCell(win, col_b, row_a, LOWER, c, base);
+        putCell(win, col_a, row_b, UPPER, c, base);
+        putCell(win, col_b, row_b, UPPER, c, base);
+    }
+
+    // Layer 3: hint corners — thick, edge-aligned (compose).
+    if (marks.best_move)
+        hRun(win, right - 1, right, top, FULL, Theme.highlight_hint_best, base); // ▀ top-right
+    if (marks.endangered)
+        hRun(win, left, left + 1, bottom, FULL, Theme.highlight_endangered, base); // ▄ bottom-left
+
+    // Layer 4: cursor — thick bright segments at the middle of each edge (top
+    // layer, most visible).
+    if (marks.cursor) {
+        const c = Theme.highlight_cursor;
+        hRun(win, left + 3, right - 3, top, UPPER, c, base); // ▀ top-mid
+        hRun(win, left + 3, right - 3, bottom, LOWER, c, base); // ▄ bottom-mid
+        vRun(win, left, row_a, row_b, FULL, c, base); // █ left-mid
+        vRun(win, right, row_a, row_b, FULL, c, base); // █ right-mid
+    }
 }
 
 pub fn boardWidth(opts: RenderOptions) u16 {
@@ -131,7 +285,6 @@ pub fn renderBoardCore(win: Window, board: *const chess.Board, opts: RenderOptio
             const file: u3 = @intCast(sq_idx % 8);
             const rank: u3 = @intCast(sq_idx / 8);
             const base = baseSquareColor(file, rank);
-            const bg = if (highlight) |g| (squareHighlight(g, sq_idx) orelse base) else base;
 
             const cx: u16 = x_origin + @as(u16, display_col) * opts.cell_w;
 
@@ -141,7 +294,7 @@ pub fn renderBoardCore(win: Window, board: *const chess.Board, opts: RenderOptio
                     const cx_off: u16 = cx + @as(u16, @intCast(col_off));
                     win.writeCell(cx_off, ry_off, .{
                         .char = .{ .grapheme = " ", .width = 1 },
-                        .style = .{ .bg = bg },
+                        .style = .{ .bg = base },
                     });
                 }
             }
@@ -150,7 +303,7 @@ pub fn renderBoardCore(win: Window, board: *const chess.Board, opts: RenderOptio
                 if (use_sprites) {
                     if (piece.pieceType()) |pt| {
                         const fg = pieceColor(piece);
-                        sprites.stamp(win, sprites.forPieceType(pt), cx, ry, opts.cell_w, opts.cell_h, fg, bg);
+                        sprites.stamp(win, sprites.forPieceType(pt), cx, ry, opts.cell_w, opts.cell_h, fg, base);
                     }
                 } else {
                     if (piece.pieceType()) |pt| {
@@ -159,10 +312,14 @@ pub fn renderBoardCore(win: Window, board: *const chess.Board, opts: RenderOptio
                         const py = ry + opts.cell_h / 2;
                         win.writeCell(px, py, .{
                             .char = .{ .grapheme = sym, .width = 1 },
-                            .style = .{ .fg = pieceColor(piece), .bg = bg },
+                            .style = .{ .fg = pieceColor(piece), .bg = base },
                         });
                     }
                 }
+            }
+
+            if (highlight) |g| {
+                drawMarks(win, cx, ry, opts, squareMarks(g, sq_idx), base);
             }
         }
     }
@@ -411,74 +568,204 @@ pub fn renderResizeMessage(win: Window) void {
 
 const testing = @import("std").testing;
 
-test "squareHighlight: cursor takes priority over endangered hint" {
+test "squareMarks: empty legal target -> center, no border (AE1)" {
     var game = Game.init();
-    game.hints_enabled = true;
-    const sq = game.cursor.toIndex();
-    game.hint_endangered[sq] = true;
-
-    const color = squareHighlight(&game, sq);
-    try testing.expect(color != null);
-    try testing.expectEqual(Theme.highlight_cursor, color.?);
-}
-
-test "squareHighlight: check takes priority over endangered hint" {
-    var game = Game.init();
-    // Set up a check position: white king on e1, black rook on e8
     game.board = chess.Board.empty();
-    const wk_sq = chess.Square.init(.e, .@"1");
-    const bk_sq = chess.Square.init(.h, .@"8");
-    const br_sq = chess.Square.init(.e, .@"8");
-    game.board.squares[wk_sq.toIndex()] = chess.Piece.init(.white, .king);
-    game.board.squares[bk_sq.toIndex()] = chess.Piece.init(.black, .king);
-    game.board.squares[br_sq.toIndex()] = chess.Piece.init(.black, .rook);
-    game.board.active_color = .white;
+    const sq = chess.Square.init(.d, .@"4");
+    game.legal_targets[sq.toIndex()] = true;
 
-    game.hints_enabled = true;
-    game.hint_endangered[wk_sq.toIndex()] = true;
-    // Move cursor away so it doesn't interfere
-    game.cursor = chess.Square.init(.a, .@"1");
-
-    const color = squareHighlight(&game, wk_sq.toIndex());
-    try testing.expect(color != null);
-    try testing.expectEqual(Theme.highlight_check, color.?);
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expect(m.center);
+    try testing.expect(m.border == null);
 }
 
-test "squareHighlight: endangered hint shown when no higher priority" {
+test "squareMarks: occupied legal target -> capture border (AE1)" {
     var game = Game.init();
+    game.board = chess.Board.empty();
+    const sq = chess.Square.init(.d, .@"4");
+    game.board.squares[sq.toIndex()] = chess.Piece.init(.black, .knight);
+    game.legal_targets[sq.toIndex()] = true;
+
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expectEqual(BorderStyle.capture, m.border.?);
+    try testing.expect(!m.center);
+}
+
+test "squareMarks: capture composes with endangered and best-move corners (AE2)" {
+    var game = Game.init();
+    game.board = chess.Board.empty();
+    const sq = chess.Square.init(.d, .@"4");
+    game.board.squares[sq.toIndex()] = chess.Piece.init(.black, .knight);
+    game.legal_targets[sq.toIndex()] = true;
     game.hints_enabled = true;
-    // Pick a square that's not the cursor
-    const sq = chess.Square.init(.a, .@"8");
     game.hint_endangered[sq.toIndex()] = true;
-    // Cursor is at e2 by default, not a8
+    game.hint_best_move = .{ .from = chess.Square.init(.a, .@"1"), .to = sq };
 
-    const color = squareHighlight(&game, sq.toIndex());
-    try testing.expect(color != null);
-    try testing.expectEqual(Theme.highlight_endangered, color.?);
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expectEqual(BorderStyle.capture, m.border.?);
+    try testing.expect(m.endangered);
+    try testing.expect(m.best_move);
+    // from-arm of the best_move disjunction (bm.from == sq)
+    try testing.expect(squareMarks(&game, chess.Square.init(.a, .@"1").toIndex()).best_move);
 }
 
-test "squareHighlight: best move hint shown when enabled" {
+test "squareMarks: check outranks selected on the king square (AE3)" {
     var game = Game.init();
-    game.hints_enabled = true;
-    const from_sq = chess.Square.init(.a, .@"8");
-    const to_sq = chess.Square.init(.a, .@"7");
-    game.hint_best_move = .{ .from = from_sq, .to = to_sq };
+    game.board = chess.Board.empty();
+    const wk = chess.Square.init(.e, .@"1");
+    const bk = chess.Square.init(.h, .@"8");
+    const br = chess.Square.init(.e, .@"8");
+    game.board.squares[wk.toIndex()] = chess.Piece.init(.white, .king);
+    game.board.squares[bk.toIndex()] = chess.Piece.init(.black, .king);
+    game.board.squares[br.toIndex()] = chess.Piece.init(.black, .rook);
+    game.board.active_color = .white;
+    game.selected = wk;
 
-    const color_from = squareHighlight(&game, from_sq.toIndex());
-    try testing.expect(color_from != null);
-    try testing.expectEqual(Theme.highlight_hint_best, color_from.?);
-
-    const color_to = squareHighlight(&game, to_sq.toIndex());
-    try testing.expect(color_to != null);
-    try testing.expectEqual(Theme.highlight_hint_best, color_to.?);
+    const m = squareMarks(&game, wk.toIndex());
+    try testing.expectEqual(BorderStyle.check, m.border.?);
 }
 
-test "squareHighlight: hints not shown when disabled" {
+test "squareMarks: selected vs cursor are distinct families (AE4)" {
+    var game = Game.init();
+    const sel_sq = chess.Square.init(.a, .@"8");
+    game.selected = sel_sq;
+    game.cursor = chess.Square.init(.h, .@"1");
+
+    const m_sel = squareMarks(&game, sel_sq.toIndex());
+    try testing.expectEqual(BorderStyle.selected, m_sel.border.?);
+    try testing.expect(!m_sel.cursor);
+
+    const m_cur = squareMarks(&game, game.cursor.toIndex());
+    try testing.expect(m_cur.cursor);
+    try testing.expect(m_cur.border == null);
+}
+
+test "resolveBorder: full precedence chain check > flash > selected > capture > engine" {
+    try testing.expectEqual(BorderStyle.check, resolveBorder(true, true, true, true, true).?);
+    try testing.expectEqual(BorderStyle.flash, resolveBorder(false, true, true, true, true).?);
+    try testing.expectEqual(BorderStyle.selected, resolveBorder(false, false, true, true, true).?);
+    try testing.expectEqual(BorderStyle.capture, resolveBorder(false, false, false, true, true).?);
+    try testing.expectEqual(BorderStyle.engine, resolveBorder(false, false, false, false, true).?);
+    try testing.expect(resolveBorder(false, false, false, false, false) == null);
+    // selected outranks capture even when both flags are set (data model allows it)
+    try testing.expectEqual(BorderStyle.selected, resolveBorder(false, false, true, true, false).?);
+}
+
+test "squareMarks: selected wins over engine-last-move" {
+    var game = Game.init();
+    const sq = chess.Square.init(.c, .@"3");
+    game.selected = sq;
+    game.engine_last_move = .{ .from = chess.Square.init(.a, .@"1"), .to = sq };
+
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expectEqual(BorderStyle.selected, m.border.?);
+}
+
+test "squareMarks: engine-last-move alone yields engine border" {
+    var game = Game.init();
+    const sq = chess.Square.init(.c, .@"3");
+    game.engine_last_move = .{ .from = chess.Square.init(.a, .@"3"), .to = sq };
+
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expectEqual(BorderStyle.engine, m.border.?);
+    // from-arm of the engine disjunction (em.from == sq)
+    try testing.expectEqual(BorderStyle.engine, squareMarks(&game, chess.Square.init(.a, .@"3").toIndex()).border.?);
+}
+
+test "squareMarks: flash wins over selected when timer active" {
+    var game = Game.init();
+    const sq = chess.Square.init(.c, .@"3");
+    game.selected = sq;
+    game.flash_square = sq;
+    game.flash_timer = 1;
+
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expectEqual(BorderStyle.flash, m.border.?);
+}
+
+test "squareMarks: flash ignored when timer is zero" {
+    var game = Game.init();
+    const sq = chess.Square.init(.c, .@"3");
+    game.flash_square = sq;
+    game.flash_timer = 0;
+    game.selected = sq;
+
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expectEqual(BorderStyle.selected, m.border.?);
+}
+
+test "squareMarks: hints disabled suppresses endangered and best-move" {
     var game = Game.init();
     game.hints_enabled = false;
     const sq = chess.Square.init(.a, .@"8");
     game.hint_endangered[sq.toIndex()] = true;
+    game.hint_best_move = .{ .from = sq, .to = chess.Square.init(.a, .@"7") };
 
-    const color = squareHighlight(&game, sq.toIndex());
-    try testing.expect(color == null);
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expect(!m.endangered);
+    try testing.expect(!m.best_move);
+}
+
+test "squareMarks: quiet empty square has no marks" {
+    var game = Game.init();
+    game.board = chess.Board.empty();
+    const sq = chess.Square.init(.d, .@"5");
+    game.cursor = chess.Square.init(.h, .@"1");
+
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expect(m.border == null);
+    try testing.expect(!m.cursor and !m.endangered and !m.best_move and !m.center);
+}
+
+test "drawMarks: writes nothing below the minimum cell size (guard)" {
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .rows = 20, .cols = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    const win = Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 20, .screen = &screen };
+
+    for (0..20) |y| {
+        for (0..20) |x| {
+            win.writeCell(@intCast(x), @intCast(y), .{ .char = .{ .grapheme = "X", .width = 1 } });
+        }
+    }
+
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    drawMarks(win, 2, 2, .{ .cell_w = 11, .cell_h = 6 }, marks, Theme.dark_square);
+
+    for (0..20) |y| {
+        for (0..20) |x| {
+            try testing.expectEqualStrings("X", screen.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
+        }
+    }
+}
+
+test "drawMarks: marks stay inside the cell rect (containment)" {
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .rows = 20, .cols = 20, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    const win = Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 20, .height = 20, .screen = &screen };
+
+    for (0..20) |y| {
+        for (0..20) |x| {
+            win.writeCell(@intCast(x), @intCast(y), .{ .char = .{ .grapheme = "X", .width = 1 } });
+        }
+    }
+
+    const cx: u16 = 2;
+    const ry: u16 = 2;
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    drawMarks(win, cx, ry, .{}, marks, Theme.dark_square);
+
+    // It actually drew: the cell's top-left corner is now a (multi-byte) mark glyph, not the sentinel.
+    try testing.expect(!std.mem.eql(u8, "X", screen.readCell(cx, ry).?.char.grapheme));
+
+    // No mark bled outside [cx, cx+12) x [ry, ry+6); vaxis clips to the window, not the cell.
+    for (0..20) |yy| {
+        for (0..20) |xx| {
+            const x: u16 = @intCast(xx);
+            const y: u16 = @intCast(yy);
+            const inside = x >= cx and x < cx + 12 and y >= ry and y < ry + 6;
+            if (!inside) {
+                try testing.expectEqualStrings("X", screen.readCell(x, y).?.char.grapheme);
+            }
+        }
+    }
 }
