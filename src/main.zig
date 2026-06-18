@@ -106,7 +106,7 @@ fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Engin
 
 fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *EngineResult, event_loop: *vaxis.Loop(Event)) void {
     hints_log.debug("background analysis started", .{});
-    const analysis = eng.analyze(board, 500) catch {
+    const analysis = eng.analyzeFullStrength(board, 500) catch {
         hints_log.warn("background analysis failed", .{});
         result.failed = true;
         event_loop.postEvent(.engine_analysis_ready) catch {};

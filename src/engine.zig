@@ -82,9 +82,7 @@ pub const Engine = struct {
         try self.sendCommand("uci");
         try self.readUntilToken("uciok");
 
-        var skill_buf: [64]u8 = undefined;
-        const skill_cmd = std.fmt.bufPrint(&skill_buf, "setoption name Skill Level value {d}", .{self.skill}) catch unreachable;
-        try self.sendCommand(skill_cmd);
+        try self.setSkillLevel(self.skill);
 
         try self.waitReady();
     }
@@ -195,6 +193,22 @@ pub const Engine = struct {
             }
         }
         return EngineError.EngineTimeout;
+    }
+
+    fn setSkillLevel(self: *Engine, level: u8) !void {
+        var buf: [64]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&buf, "setoption name Skill Level value {d}", .{level}) catch unreachable;
+        try self.sendCommand(cmd);
+    }
+
+    /// Analyze at full strength regardless of the configured skill: raise Skill Level
+    /// to 20 for the search and restore the configured skill on every exit path. Safe
+    /// because hints fire only on the human's turn and cancelAnalysis precedes every
+    /// opponent getMove, so the raise never overlaps the opponent search on this engine.
+    pub fn analyzeFullStrength(self: *Engine, board: *const Board, movetime_ms: u32) !Analysis {
+        try self.setSkillLevel(20);
+        defer self.setSkillLevel(self.skill) catch {};
+        return self.analyze(board, movetime_ms);
     }
 
     pub fn stop(self: *Engine) void {
