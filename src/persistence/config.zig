@@ -176,12 +176,13 @@ test "preferences migrates legacy default_elo to skill" {
 
     Dir.cwd().writeFile(io, .{
         .sub_path = tmp_dir ++ "/config.json",
-        .data = "{\"default_elo\": 1320, \"default_color\": \"white\", \"default_time_control\": 0}",
+        .data = "{\"default_elo\": 2305, \"default_color\": \"white\", \"default_time_control\": 0}",
     }) catch return;
 
     const prefs = loadPreferences(allocator, io, tmp_dir);
-    // 1320 is the table floor -> skill 0; proves the legacy elo path is taken.
-    try std.testing.expectEqual(@as(u8, 0), prefs.default_skill_level);
+    // 2305 maps to skill 10 (not the no-field default of 0), so this can only pass
+    // if the legacy default_elo -> eloToSkill branch actually runs.
+    try std.testing.expectEqual(@as(u8, 10), prefs.default_skill_level);
 }
 
 test "preferences clamps out-of-range persisted skill" {

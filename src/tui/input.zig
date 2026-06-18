@@ -49,20 +49,23 @@ pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
     }
 
     // Quit / leave-to-menu: instant when the game is over, confirm while in progress.
-    // Handled before the thinking gate so they work during the engine's search too.
-    if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
-        if (game.game_phase == .playing) {
-            game.quit_pending = true;
-            return .render;
+    // Before the thinking gate so they work mid-search, but deferred during promotion
+    // (like the resign trigger) so the confirm prompt can't hide behind the promotion UI.
+    if (game.promotion_pending == null) {
+        if (key.matches('q', .{}) or key.matches('c', .{ .ctrl = true })) {
+            if (game.game_phase == .playing) {
+                game.quit_pending = true;
+                return .render;
+            }
+            return .quit;
         }
-        return .quit;
-    }
-    if (key.matches('n', .{})) {
-        if (game.game_phase == .playing) {
-            game.leave_pending = true;
-            return .render;
+        if (key.matches('n', .{})) {
+            if (game.game_phase == .playing) {
+                game.leave_pending = true;
+                return .render;
+            }
+            return .new_game;
         }
-        return .new_game;
     }
 
     // During engine thinking, only allow the resign prompt and flip (plus the above).
@@ -204,4 +207,16 @@ test "input: n on a finished game returns to menu instantly" {
     game.game_phase = .ended;
     try std.testing.expectEqual(Action.new_game, handleKeyPress(&game, fakeKey('n', .{})));
     try std.testing.expect(!game.leave_pending);
+}
+
+test "input: q during promotion does not open a hidden quit confirm" {
+    var game = Game.init();
+    game.promotion_pending = .{
+        .from = chess.Square.init(.e, .@"7"),
+        .to = chess.Square.init(.e, .@"8"),
+        .selected_idx = 0,
+    };
+    const action = handleKeyPress(&game, fakeKey('q', .{}));
+    try std.testing.expectEqual(Action.none, action);
+    try std.testing.expect(!game.quit_pending);
 }
