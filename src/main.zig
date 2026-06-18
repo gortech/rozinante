@@ -891,12 +891,22 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // Auto-save after new moves
-            if (game_state.move_count > prev_move_count) {
-                log.debug("move #{d} detected, triggering auto-save", .{game_state.move_count});
+            // Auto-save on any move-count change: forward moves rewrite the save, and
+            // take-backs rewrite it to the remaining moves (or delete it at zero).
+            if (game_state.move_count != prev_move_count) {
                 prev_move_count = game_state.move_count;
-                if (data_dir) |dd| autoSave(io, alloc, &game_state, dd, &current_save_path, game_elo, player_color, game_start_secs);
-                log.debug("auto-save completed for move #{d}", .{game_state.move_count});
+                if (data_dir) |dd| {
+                    if (game_state.move_count == 0) {
+                        // Undone to the initial position: remove the save so crash
+                        // recovery won't resurface it, and clear the resume pointer.
+                        if (current_save_path) |p| {
+                            storage.deleteGame(io, p) catch {};
+                            current_save_path = null;
+                        }
+                    } else {
+                        autoSave(io, alloc, &game_state, dd, &current_save_path, game_elo, player_color, game_start_secs);
+                    }
+                }
             }
 
             // Update thinking timer for display
