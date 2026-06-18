@@ -533,6 +533,13 @@ pub fn main(init: std.process.Init) !void {
     const opening_book = try alloc.create(openings.OpeningBook);
     opening_book.* = openings.OpeningBook.init();
 
+    // Seeded once at startup: re-seeding per move would be deterministic. Used by the
+    // beginner move handicap (U2). std.crypto.random is absent in this Zig; the time
+    // idiom mirrors the random-color pick below.
+    const seed_ns: u96 = @bitCast(Io.Timestamp.now(io, .real).nanoseconds);
+    var prng = std.Random.DefaultPrng.init(@truncate(seed_ns));
+    const rng = prng.random();
+
     main_loop: while (true) {
         // --- Crash recovery: scan for unfinished games ---
         var resume_filepath: ?[]const u8 = null;
@@ -815,7 +822,16 @@ pub fn main(init: std.process.Init) !void {
                                 };
                                 dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                             }
-                        } else if (engine_result.move) |move| {
+                        } else if (engine_result.move) |engine_move| {
+                            // Beginner handicap (U2): at the lowest skill levels, sometimes
+                            // play a random legal move instead of the engine's pick. Confined
+                            // to this opponent-move seam so aids/hints stay full strength (R14).
+                            var move = engine_move;
+                            if (current_engine) |*eng| {
+                                if (engine_mod.shouldHandicap(eng.skill, rng)) {
+                                    if (engine_mod.pickHandicapMove(&game_state.board, rng)) |hm| move = hm;
+                                }
+                            }
                             var move_buf: [5]u8 = undefined;
                             const uci = move.toUci(&move_buf);
                             log.debug("engine move received: {s}", .{uci});

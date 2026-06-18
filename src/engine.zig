@@ -345,6 +345,29 @@ pub fn eloToSkill(elo: u16) u8 {
     return best;
 }
 
+// --- Beginner move handicap ---
+// Stockfish at Skill Level 0 still plays ~club strength, below which no UCI option
+// reaches. The lowest skill levels therefore occasionally substitute a uniformly
+// random legal move for the engine's pick. ponytail: uniform random is the floor
+// lever; swap for a blunder-weighted pick only if calibration shows it feels erratic.
+const handicap_table = [_]u8{ 80, 55, 35, 18 }; // percent, by skill 0..3; 0 above.
+
+pub fn handicapRate(skill: u8) u8 {
+    return if (skill < handicap_table.len) handicap_table[skill] else 0;
+}
+
+pub fn shouldHandicap(skill: u8, rng: std.Random) bool {
+    const rate = handicapRate(skill);
+    if (rate == 0) return false;
+    return rng.uintLessThan(u8, 100) < rate;
+}
+
+pub fn pickHandicapMove(board: *const Board, rng: std.Random) ?Move {
+    const legal = chess.legalMoves(board);
+    if (legal.len == 0) return null;
+    return legal.moves[rng.uintLessThan(usize, legal.len)];
+}
+
 // --- Tests ---
 
 test "parseBestMove: standard move" {
@@ -480,4 +503,59 @@ test "findStockfish: function signature compiles" {
     // findStockfish requires a real Io from main(); we can only verify it compiles.
     // Integration testing with Stockfish is done via the game loop.
     try std.testing.expect(@TypeOf(findStockfish) == fn (Io, ?[]const u8) EngineError![]const u8);
+}
+
+test "handicapRate: high at floor, zero above threshold, non-increasing" {
+    try std.testing.expect(handicapRate(0) > 0);
+    try std.testing.expectEqual(@as(u8, 0), handicapRate(20));
+    var prev: u8 = 255;
+    var s: u8 = 0;
+    while (s <= 20) : (s += 1) {
+        try std.testing.expect(handicapRate(s) <= prev);
+        prev = handicapRate(s);
+    }
+}
+
+test "shouldHandicap: never fires above threshold" {
+    var prng = std.Random.DefaultPrng.init(0xABCDEF);
+    const rng = prng.random();
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        try std.testing.expect(!shouldHandicap(20, rng));
+    }
+}
+
+test "shouldHandicap: fires often at skill 0" {
+    var prng = std.Random.DefaultPrng.init(0xABCDEF);
+    const rng = prng.random();
+    var fires: usize = 0;
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        if (shouldHandicap(0, rng)) fires += 1;
+    }
+    try std.testing.expect(fires > 500);
+}
+
+test "pickHandicapMove: returns a legal move (initial position)" {
+    var prng = std.Random.DefaultPrng.init(0x1234);
+    const rng = prng.random();
+    const board = Board.initial;
+    const m = pickHandicapMove(&board, rng).?;
+    const legal = chess.legalMoves(&board);
+    var found = false;
+    for (legal.moves[0..legal.len]) |lm| {
+        if (lm.eql(m)) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "pickHandicapMove: single legal move returns it" {
+    var prng = std.Random.DefaultPrng.init(0x9999);
+    const rng = prng.random();
+    // White Ka1, Black Kc1 + Rb8: the only legal move is Ka1-a2.
+    const board = Board.fromFen("1r6/8/8/8/8/8/8/K1k5 w - - 0 1").?;
+    const legal = chess.legalMoves(&board);
+    try std.testing.expectEqual(@as(usize, 1), legal.len);
+    const m = pickHandicapMove(&board, rng).?;
+    try std.testing.expect(m.eql(legal.moves[0]));
 }
