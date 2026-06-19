@@ -1,7 +1,7 @@
 ---
 date: 2026-06-19
 type: feat
-status: active
+status: completed
 origin: docs/brainstorms/post-game-analysis-review-requirements.md
 ---
 
