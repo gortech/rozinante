@@ -260,10 +260,7 @@ pub const ViewerState = struct {
 
         const hint_y = win.height -| 2;
         if (hint_y > y) {
-            const hint = if (ana != null)
-                "\xe2\x86\x90\xe2\x86\x92 Step  n/p Key  Esc Back"
-            else
-                "\xe2\x86\x90\xe2\x86\x92 Step  Home/End  Esc Back";
+            const hint = "\xe2\x86\x90\xe2\x86\x92 Step  Home/End  Esc Back";
             _ = renderer.writeStr(win, 1, hint_y, hint, .{ .fg = Theme.text_dim, .bg = Theme.bg });
         }
     }
@@ -299,11 +296,17 @@ pub const ViewerState = struct {
             }
         }
 
-        if (self.key_moment_idx) |ki| {
-            var col = renderer.writeStr(win, 1, y, "Key ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-            col = renderer.writeNum(win, col, y, @intCast(ki + 1), .{ .fg = Theme.text_primary, .bg = Theme.bg });
-            col = renderer.writeStr(win, col, y, "/", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-            _ = renderer.writeNum(win, col, y, @intCast(ga.key_moment_count), .{ .fg = Theme.text_primary, .bg = Theme.bg });
+        if (ga.key_moment_count > 0) {
+            // Discoverable key-moment nav (R6): n/p jump between the biggest swings.
+            var col = renderer.writeStr(win, 1, y, "n/p key moment", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            if (self.key_moment_idx) |ki| {
+                col = renderer.writeStr(win, col, y, " ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+                col = renderer.writeNum(win, col, y, @intCast(ki + 1), .{ .fg = Theme.text_primary, .bg = Theme.bg });
+                col = renderer.writeStr(win, col, y, "/", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+                _ = renderer.writeNum(win, col, y, @intCast(ga.key_moment_count), .{ .fg = Theme.text_primary, .bg = Theme.bg });
+            } else {
+                _ = renderer.writeStr(win, col, y, "s", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            }
             y += 1;
         }
 
@@ -435,6 +438,8 @@ test "viewer paints the best-move SAN + eval (not a dangling slice)" {
     var ga = analysis_mod.GameAnalysis{};
     ga.count = 1;
     ga.moves[0] = .{ .eval = .{ .cp = -30 }, .best = e4, .best_eval = .{ .cp = 30 }, .cpl = 0, .tier = .good };
+    ga.key_moment_count = 1;
+    ga.key_moments[0] = 0;
 
     var v = ViewerState.init(&boards, &sans, 1);
     v.position = 0;
@@ -464,4 +469,5 @@ test "viewer paints the best-move SAN + eval (not a dangling slice)" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Best") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "e4") != null); // the best-move SAN must paint
     try std.testing.expect(std.mem.indexOf(u8, text, "+0.3") != null); // and its eval
+    try std.testing.expect(std.mem.indexOf(u8, text, "n/p") != null); // key-moment nav is discoverable
 }
