@@ -48,8 +48,9 @@ pub const Eval = union(enum) {
 /// tying them together. A game is at most this many plies.
 pub const max_plies = 512;
 
-/// How many biggest-swing plies the key-moment ranking keeps for navigation (R6).
-pub const max_key_moments = 16;
+/// How many biggest-swing plies the key-moment navigation keeps (R6). Small on purpose:
+/// n/p cycles a handful of turning points, presented in chronological order.
+pub const max_key_moments = 5;
 
 /// Current on-disk analysis format version. Bumping it invalidates older cached
 /// analysis so it is recomputed rather than trusted (U3 completeness gate).
@@ -192,13 +193,14 @@ pub fn aggregate(moves: []const MoveAnalysis) Aggregate {
     return .{ .blunders = blunders, .inaccuracies = inaccuracies, .accuracy = accuracy };
 }
 
-/// Rank plies by absolute eval swing (`cpl`) descending and keep the top
-/// `max_key_moments` indices in `out`. A mate-related swing dominates (R3 → R6).
-/// Returns the number of entries written.
+/// Select the `max_key_moments` biggest-swing plies, returned in CHRONOLOGICAL order
+/// (ascending ply) so n/p navigation steps through the game forward; a mate-related
+/// swing is always among them. Returns the number of entries written.
 pub fn computeKeyMoments(moves: []const MoveAnalysis, out: *[max_key_moments]u16) u8 {
     const n = moves.len;
     var idx: [max_plies]u16 = undefined;
     for (0..n) |i| idx[i] = @intCast(i);
+    // Rank by swing to pick the top-k...
     std.sort.insertion(u16, idx[0..n], moves, struct {
         fn lessThan(ctx: []const MoveAnalysis, a: u16, b: u16) bool {
             return ctx[a].cpl > ctx[b].cpl; // descending by swing
@@ -206,6 +208,12 @@ pub fn computeKeyMoments(moves: []const MoveAnalysis, out: *[max_key_moments]u16
     }.lessThan);
     const k: u8 = @intCast(@min(n, max_key_moments));
     for (0..k) |i| out[i] = idx[i];
+    // ...then present them chronologically.
+    std.sort.insertion(u16, out[0..k], {}, struct {
+        fn lessThan(_: void, a: u16, b: u16) bool {
+            return a < b;
+        }
+    }.lessThan);
     return k;
 }
 
@@ -347,19 +355,19 @@ test "aggregate: accuracy decreases as cpl rises" {
     try std.testing.expect(a_clean > a_sloppy);
 }
 
-test "computeKeyMoments: ranks by swing, mate magnitude first" {
+test "computeKeyMoments: keeps the top-5 swings, in chronological order" {
     var ga = GameAnalysis{};
-    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 10, .tier = .good });
-    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 500, .tier = .bad });
-    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 99_000, .tier = .bad });
-    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 80, .tier = .meh });
+    const cpls = [_]i32{ 10, 500, 99_000, 80, 5, 300, 20 }; // plies 0..6
+    for (cpls) |c| ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = c, .tier = .bad });
     var out: [max_key_moments]u16 = undefined;
     const k = computeKeyMoments(ga.moves[0..ga.count], &out);
-    try std.testing.expectEqual(@as(u8, 4), k);
-    try std.testing.expectEqual(@as(u16, 2), out[0]); // 99_000 (mate magnitude)
-    try std.testing.expectEqual(@as(u16, 1), out[1]); // 500
-    try std.testing.expectEqual(@as(u16, 3), out[2]); // 80
-    try std.testing.expectEqual(@as(u16, 0), out[3]); // 10
+    // Top-5 swings = plies {1,2,3,5,6} (cpl 500,99000,80,300,20); plies 0 (10) and 4 (5) drop.
+    try std.testing.expectEqual(@as(u8, 5), k);
+    try std.testing.expectEqual(@as(u16, 1), out[0]);
+    try std.testing.expectEqual(@as(u16, 2), out[1]);
+    try std.testing.expectEqual(@as(u16, 3), out[2]);
+    try std.testing.expectEqual(@as(u16, 5), out[3]);
+    try std.testing.expectEqual(@as(u16, 6), out[4]);
 }
 
 test "computeKeyMoments: empty game returns zero" {
@@ -377,7 +385,7 @@ test "GameAnalysis.finalize: fills aggregates, key moments, marker" {
     try std.testing.expectEqual(@as(u16, 2), ga.plies_covered);
     try std.testing.expectEqual(current_version, ga.version);
     try std.testing.expectEqual(@as(u8, 2), ga.key_moment_count);
-    try std.testing.expectEqual(@as(u16, 1), ga.key_moments[0]); // the blunder swings most
+    try std.testing.expectEqual(@as(u16, 0), ga.key_moments[0]); // chronological: earliest first
 }
 
 test "buildFromEvals: after-eval shifts, last ply uses final, engine plies untiered" {
