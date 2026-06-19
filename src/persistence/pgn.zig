@@ -587,7 +587,7 @@ fn parseTier(s: []const u8) ?analysis.Tier {
 }
 
 /// SAN of a hypothetical move from `board_before` (used for the engine's best move).
-fn sanForMove(board_before: *const chess.Board, m: chess.Move) SanNotation {
+pub fn sanForMove(board_before: *const chess.Board, m: chess.Move) SanNotation {
     const piece = board_before.pieceAt(m.from);
     const captured_raw = board_before.pieceAt(m.to);
     const captured: ?chess.Piece = if (m.move_type == .en_passant)

@@ -626,6 +626,7 @@ fn runGameViewer(
     }
 
     var viewer = ViewerState.init(&boards, &san_list, move_count);
+    viewer.player_color = viewerPlayerColor(&parsed);
 
     // --- Analysis: cached if present, else backfill via a provisioned engine (U5) ---
     var pass_future: ?Io.Future(void) = null;

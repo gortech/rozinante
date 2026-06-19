@@ -7,6 +7,7 @@ const chess = @import("../chess.zig");
 const game_mod = @import("game.zig");
 const Game = game_mod.Game;
 const sprites = @import("sprites.zig");
+const analysis = @import("../analysis.zig");
 
 pub const Palette = struct {
     bg: Color,
@@ -26,6 +27,9 @@ pub const Palette = struct {
     highlight_endangered: Color,
     highlight_hint_best: Color,
     selection_bg: Color,
+    eval_good: Color,
+    eval_meh: Color,
+    eval_bad: Color,
 };
 
 pub const ThemeId = enum {
@@ -88,6 +92,9 @@ fn paletteOf(bg: [3]u8, dark: [3]u8, light: [3]u8, wp: [3]u8, bp: [3]u8, tp: [3]
         .highlight_endangered = rgb(.{ 255, 100, 50 }),
         .highlight_hint_best = rgb(.{ 50, 200, 100 }),
         .selection_bg = rgb(sel),
+        .eval_good = rgb(.{ 80, 210, 120 }),
+        .eval_meh = rgb(.{ 230, 190, 70 }),
+        .eval_bad = rgb(.{ 235, 85, 85 }),
     };
 }
 
@@ -102,6 +109,25 @@ pub fn palette(id: ThemeId) Palette {
 }
 
 pub var Theme: Palette = palette(.classic);
+
+/// One-character move-quality glyph — three DISTINCT shapes (not color alone), so the
+/// rating survives a colorblind reader and any theme. `tierColor` is the reinforcing
+/// (theme-invariant) color.
+pub fn tierGlyph(tier: analysis.Tier) []const u8 {
+    return switch (tier) {
+        .good => "\u{2713}", // ✓
+        .meh => "?",
+        .bad => "\u{2717}", // ✗
+    };
+}
+
+pub fn tierColor(tier: analysis.Tier) Color {
+    return switch (tier) {
+        .good => Theme.eval_good,
+        .meh => Theme.eval_meh,
+        .bad => Theme.eval_bad,
+    };
+}
 
 // drawMarks is hand-fitted to exactly this cell geometry; the RenderOptions
 // defaults and the drawMarks guard both reference it so they cannot drift apart.
