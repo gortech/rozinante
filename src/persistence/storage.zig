@@ -95,6 +95,39 @@ pub fn saveGame(allocator: Allocator, io: Io, data_dir: []const u8, game: SaveGa
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ data_dir, filename });
 }
 
+/// Atomically overwrite an existing game file *in place* with new (annotated) content.
+/// Unlike `saveGame` — which regenerates the filename from date/elo/color and would
+/// create a NEW file — this targets the opened file's own path, so analysis write-back
+/// updates the game the player actually opened rather than spawning a duplicate
+/// (R10 atomic, R11/AE2 caching).
+pub fn writeAnalyzedPgn(io: Io, filepath: []const u8, content: []const u8) !void {
+    const sep = std.mem.lastIndexOfScalar(u8, filepath, '/') orelse return error.InvalidPath;
+    const dir_path = filepath[0..sep];
+    const filename = filepath[sep + 1 ..];
+
+    var dir = Dir.openDirAbsolute(io, dir_path, .{}) catch |err| {
+        log.err("failed to open data directory {s}: {}", .{ dir_path, err });
+        return err;
+    };
+    defer dir.close(io);
+
+    var atomic = dir.createFileAtomic(io, filename, .{ .replace = true }) catch |err| {
+        log.err("failed to create atomic file: {}", .{err});
+        return err;
+    };
+    errdefer atomic.deinit(io);
+
+    atomic.file.writeStreamingAll(io, content) catch |err| {
+        log.err("failed to write analyzed game: {}", .{err});
+        return err;
+    };
+
+    atomic.replace(io) catch |err| {
+        log.err("failed to atomically replace file: {}", .{err});
+        return err;
+    };
+}
+
 pub fn loadGame(allocator: Allocator, io: Io, filepath: []const u8) ![]const u8 {
     const content = Dir.cwd().readFileAlloc(io, filepath, allocator, .limited(1024 * 1024)) catch |err| {
         log.err("failed to load game from {s}: {}", .{ filepath, err });
@@ -338,4 +371,38 @@ test "listGames on missing directory returns empty" {
     const io = getTestIo();
     const games = try listGames(std.testing.allocator, io, "/tmp/rozinante-nonexistent-dir-42");
     try std.testing.expectEqual(@as(usize, 0), games.len);
+}
+
+test "writeAnalyzedPgn overwrites the opened file in place (no duplicate)" {
+    const io = getTestIo();
+    const allocator = std.testing.allocator;
+
+    const tmp_dir = "/tmp/rozinante-test-analyzed";
+    Dir.cwd().createDirPath(io, tmp_dir) catch {};
+    defer cleanupTestDir(io, tmp_dir);
+
+    const path = try saveGame(allocator, io, tmp_dir, .{
+        .pgn_content = "[Event \"T\"]\n[Result \"1-0\"]\n\n1. e4 1-0\n",
+        .date_secs = 1783529422,
+        .elo = 1200,
+        .color = "white",
+    });
+    defer allocator.free(path);
+
+    const annotated = "[Event \"T\"]\n[Result \"1-0\"]\n[RozAnalysis \"v1 plies=1 bad=0 meh=0 acc=99.0\"]\n\n1. e4 {roz: good best=e4 eval=30 cpl=0} 1-0\n";
+    try writeAnalyzedPgn(io, path, annotated);
+
+    const loaded = try loadGame(allocator, io, path);
+    defer allocator.free(loaded);
+    try std.testing.expectEqualStrings(annotated, loaded);
+
+    // The in-place write must NOT spawn a second file (the saveGame-regenerates-filename bug).
+    var dir = try Dir.openDirAbsolute(io, tmp_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |e| {
+        if (e.kind == .file) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }

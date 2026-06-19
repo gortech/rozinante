@@ -1,6 +1,7 @@
 const std = @import("std");
 const chess = @import("../chess.zig");
 const game = @import("../tui/game.zig");
+const analysis = @import("../analysis.zig");
 
 pub const MoveRecord = game.MoveRecord;
 
@@ -150,6 +151,7 @@ pub fn writePgn(
     header: PgnHeader,
     move_records: []const MoveRecord,
     board_history: []const chess.Board,
+    ga: ?*const analysis.GameAnalysis,
 ) PgnError![]const u8 {
     var pos: usize = 0;
 
@@ -160,6 +162,19 @@ pub fn writePgn(
     pos = try appendTag(buf, pos, "White", header.white);
     pos = try appendTag(buf, pos, "Black", header.black);
     pos = try appendTag(buf, pos, "Result", header.result);
+
+    if (ga) |a| {
+        var hbuf: [96]u8 = undefined;
+        var abuf: [16]u8 = undefined;
+        const acc_str = if (a.accuracy) |acc|
+            (std.fmt.bufPrint(&abuf, "{d:.1}", .{acc}) catch "-")
+        else
+            "-";
+        const val = std.fmt.bufPrint(&hbuf, "v{d} plies={d} bad={d} meh={d} acc={s}", .{
+            a.version, a.plies_covered, a.blunders, a.inaccuracies, acc_str,
+        }) catch return error.BufferTooSmall;
+        pos = try appendTag(buf, pos, "RozAnalysis", val);
+    }
     pos = try appendSlice(buf, pos, "\n");
 
     var line_len: usize = 0;
@@ -192,6 +207,23 @@ pub fn writePgn(
 
         pos = try appendSlice(buf, pos, token);
         line_len += token.len;
+
+        if (ga) |a| {
+            if (i < a.count) {
+                var cbuf: [64]u8 = undefined;
+                const comment = formatRozComment(&cbuf, a.moves[i], &board_history[i]);
+                if (line_len > 0 and line_len + 1 + comment.len > 80) {
+                    pos = try appendSlice(buf, pos, "\n");
+                    line_len = 0;
+                }
+                if (line_len > 0) {
+                    pos = try appendSlice(buf, pos, " ");
+                    line_len += 1;
+                }
+                pos = try appendSlice(buf, pos, comment);
+                line_len += comment.len;
+            }
+        }
     }
 
     if (line_len > 0) {
@@ -235,6 +267,11 @@ pub const ParsedGame = struct {
     white: ?[]const u8 = null,
     black: ?[]const u8 = null,
     result: ?[]const u8 = null,
+
+    /// Raw value of the custom `[RozAnalysis "..."]` tag, if present (slice into input).
+    roz_analysis: ?[]const u8 = null,
+    /// Per-ply `{...}` comment content (slice into input); null where a ply had none.
+    comments: [MAX_GAME_MOVES]?[]const u8 = [_]?[]const u8{null} ** MAX_GAME_MOVES,
 
     moves: [MAX_GAME_MOVES]ParsedMove = undefined,
     move_count: usize = 0,
@@ -423,6 +460,8 @@ pub fn parseTags(text: []const u8) struct { game: ParsedGame, movetext_start: us
             g.black = value;
         } else if (std.mem.eql(u8, key, "Result")) {
             g.result = value;
+        } else if (std.mem.eql(u8, key, "RozAnalysis")) {
+            g.roz_analysis = value;
         }
     }
 
@@ -433,6 +472,7 @@ pub const MovetextResult = struct {
     moves: [MAX_GAME_MOVES]ParsedMove = undefined,
     count: usize = 0,
     final_board: chess.Board = chess.Board.initial,
+    comments: [MAX_GAME_MOVES]?[]const u8 = [_]?[]const u8{null} ** MAX_GAME_MOVES,
 };
 
 pub fn parseMovetext(text: []const u8, initial_board: chess.Board) ParseError!MovetextResult {
@@ -447,10 +487,15 @@ pub fn parseMovetext(text: []const u8, initial_board: chess.Board) ParseError!Mo
         while (pos < text.len and (text[pos] == ' ' or text[pos] == '\t' or text[pos] == '\r' or text[pos] == '\n')) : (pos += 1) {}
         if (pos >= text.len) break;
 
-        // Skip comments in braces
+        // Capture brace comments and attach to the preceding ply (instead of discarding).
         if (text[pos] == '{') {
+            const content_start = pos + 1;
             while (pos < text.len and text[pos] != '}') : (pos += 1) {}
-            if (pos < text.len) pos += 1;
+            const content_end = pos;
+            if (pos < text.len) pos += 1; // skip '}'
+            if (result.count > 0) {
+                result.comments[result.count - 1] = text[content_start..content_end];
+            }
             continue;
         }
 
@@ -495,8 +540,202 @@ pub fn parsePgn(text: []const u8) ParseError!ParsedGame {
     g.moves = move_result.moves;
     g.move_count = move_result.count;
     g.final_board = move_result.final_board;
+    g.comments = move_result.comments;
 
     return g;
+}
+
+// ---------------------------------------------------------------------------
+// Analysis annotation round-trip (U3): per-move `{roz: ...}` comments + a single
+// `[RozAnalysis "..."]` header tag. Keeps the file valid for standard PGN tools.
+// ---------------------------------------------------------------------------
+
+comptime {
+    // GameAnalysis.moves must hold every ply a game can reach.
+    if (analysis.max_plies < MAX_GAME_MOVES) @compileError("analysis.max_plies < MAX_GAME_MOVES");
+}
+
+/// Encode an eval for a `{roz: ...}` comment: integer centipawns, or `#N` for mate.
+fn encodeEval(buf: []u8, e: analysis.Eval) []const u8 {
+    return switch (e) {
+        .cp => |c| std.fmt.bufPrint(buf, "{d}", .{c}) catch "0",
+        .mate => |n| std.fmt.bufPrint(buf, "#{d}", .{n}) catch "#0",
+    };
+}
+
+/// Decode an eval token (`120`, `-50`, `#3`, `#-2`). Null on malformation.
+fn decodeEval(s: []const u8) ?analysis.Eval {
+    if (s.len == 0) return null;
+    if (s[0] == '#') return .{ .mate = std.fmt.parseInt(i32, s[1..], 10) catch return null };
+    return .{ .cp = std.fmt.parseInt(i32, s, 10) catch return null };
+}
+
+fn tierStr(t: ?analysis.Tier) []const u8 {
+    return switch (t orelse return "-") {
+        .good => "good",
+        .meh => "meh",
+        .bad => "bad",
+    };
+}
+
+/// Parse a tier token. `-` and any unknown token → null (engine ply / no tier).
+fn parseTier(s: []const u8) ?analysis.Tier {
+    if (std.mem.eql(u8, s, "good")) return .good;
+    if (std.mem.eql(u8, s, "meh")) return .meh;
+    if (std.mem.eql(u8, s, "bad")) return .bad;
+    return null;
+}
+
+/// SAN of a hypothetical move from `board_before` (used for the engine's best move).
+fn sanForMove(board_before: *const chess.Board, m: chess.Move) SanNotation {
+    const piece = board_before.pieceAt(m.from);
+    const captured_raw = board_before.pieceAt(m.to);
+    const captured: ?chess.Piece = if (m.move_type == .en_passant)
+        chess.Piece.init(board_before.active_color.opponent(), .pawn)
+    else if (captured_raw != .empty)
+        captured_raw
+    else
+        null;
+    const after = chess.makeMove(board_before.*, m);
+    return computeSan(.{ .move = m, .piece = piece, .captured = captured }, board_before, &after);
+}
+
+/// Format one ply's analysis as a `{roz: TIER best=SAN eval=ENC cpl=N}` comment.
+/// `eval` is the best-line eval (the value the viewer displays); `cpl` is the loss.
+fn formatRozComment(buf: []u8, m: analysis.MoveAnalysis, board_before: *const chess.Board) []const u8 {
+    var eval_buf: [16]u8 = undefined;
+    const eval_enc = encodeEval(&eval_buf, m.best_eval);
+    if (m.best) |bm| {
+        const san = sanForMove(board_before, bm);
+        return std.fmt.bufPrint(buf, "{{roz: {s} best={s} eval={s} cpl={d}}}", .{
+            tierStr(m.tier), san.slice(), eval_enc, m.cpl,
+        }) catch "{roz:}";
+    }
+    return std.fmt.bufPrint(buf, "{{roz: {s} best=- eval={s} cpl={d}}}", .{
+        tierStr(m.tier), eval_enc, m.cpl,
+    }) catch "{roz:}";
+}
+
+/// Fields recovered from one `{roz: ...}` comment.
+pub const ParsedRoz = struct {
+    tier: ?analysis.Tier,
+    best: ?chess.Move,
+    best_eval: analysis.Eval,
+    cpl: i32,
+};
+
+/// Best-effort, fault-isolated parse of one brace comment. Returns null when the
+/// comment is not a `roz:` comment OR is malformed in any way (bad best-SAN, garbage
+/// eval/cpl) — the caller then treats the ply as unanalyzed, which fails the
+/// completeness gate so the game is re-analyzed. NEVER throws (one bad annotation must
+/// not abort `parsePgn`).
+pub fn parseRozComment(comment: []const u8, board_before: *const chess.Board) ?ParsedRoz {
+    const trimmed = std.mem.trim(u8, comment, " \t");
+    if (!std.mem.startsWith(u8, trimmed, "roz:")) return null;
+    var it = std.mem.tokenizeScalar(u8, trimmed["roz:".len..], ' ');
+    const tier = parseTier(it.next() orelse return null);
+    var best: ?chess.Move = null;
+    var best_eval: ?analysis.Eval = null;
+    var cpl: ?i32 = null;
+    while (it.next()) |tok| {
+        if (std.mem.startsWith(u8, tok, "best=")) {
+            const v = tok["best=".len..];
+            best = if (std.mem.eql(u8, v, "-")) null else (sanToMove(board_before, v) catch return null);
+        } else if (std.mem.startsWith(u8, tok, "eval=")) {
+            best_eval = decodeEval(tok["eval=".len..]) orelse return null;
+        } else if (std.mem.startsWith(u8, tok, "cpl=")) {
+            cpl = std.fmt.parseInt(i32, tok["cpl=".len..], 10) catch return null;
+        }
+    }
+    if (best_eval == null or cpl == null) return null;
+    return .{ .tier = tier, .best = best, .best_eval = best_eval.?, .cpl = cpl.? };
+}
+
+/// Parsed `[RozAnalysis "..."]` header value: the cheap per-game summary + marker.
+pub const RozHeader = struct {
+    version: u8,
+    plies: u16,
+    blunders: u16,
+    inaccuracies: u16,
+    accuracy: ?f32,
+};
+
+/// Parse a `v1 plies=80 bad=3 meh=5 acc=78.4` header value (`acc=-` → null). Null on
+/// malformation or a missing ply-count (the marker is meaningless without it).
+pub fn parseRozHeaderValue(value: []const u8) ?RozHeader {
+    var it = std.mem.tokenizeScalar(u8, value, ' ');
+    const vtok = it.next() orelse return null;
+    if (vtok.len < 2 or vtok[0] != 'v') return null;
+    const version = std.fmt.parseInt(u8, vtok[1..], 10) catch return null;
+    var plies: ?u16 = null;
+    var bad: u16 = 0;
+    var meh: u16 = 0;
+    var acc: ?f32 = null;
+    while (it.next()) |tok| {
+        if (std.mem.startsWith(u8, tok, "plies=")) {
+            plies = std.fmt.parseInt(u16, tok["plies=".len..], 10) catch return null;
+        } else if (std.mem.startsWith(u8, tok, "bad=")) {
+            bad = std.fmt.parseInt(u16, tok["bad=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, tok, "meh=")) {
+            meh = std.fmt.parseInt(u16, tok["meh=".len..], 10) catch 0;
+        } else if (std.mem.startsWith(u8, tok, "acc=")) {
+            const v = tok["acc=".len..];
+            if (!std.mem.eql(u8, v, "-")) acc = std.fmt.parseFloat(f32, v) catch null;
+        }
+    }
+    if (plies == null) return null;
+    return .{ .version = version, .plies = plies.?, .blunders = bad, .inaccuracies = meh, .accuracy = acc };
+}
+
+/// Cheaply scan PGN text for the `[RozAnalysis "..."]` tag (no movetext parse), like
+/// `readResultTag`. Null when absent or malformed.
+pub fn readAnalysisHeader(text: []const u8) ?RozHeader {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+        const prefix = "[RozAnalysis \"";
+        if (std.mem.startsWith(u8, trimmed, prefix)) {
+            const start = prefix.len;
+            const end = std.mem.indexOf(u8, trimmed[start..], "\"]") orelse continue;
+            return parseRozHeaderValue(trimmed[start .. start + end]);
+        }
+    }
+    return null;
+}
+
+/// Reconstruct a `GameAnalysis` from a parsed game + the boards before each ply.
+/// Completeness-gated (R11): returns null — meaning "unanalyzed, re-run the pass" —
+/// unless the `RozAnalysis` marker is present, the version matches, the ply-count
+/// matches the game length, and every ply carries a parseable `roz:` comment.
+/// `boards[i]` must be the position before ply `i` (length ≥ move_count).
+pub fn assembleAnalysis(parsed: *const ParsedGame, boards: []const chess.Board) ?analysis.GameAnalysis {
+    const header = parseRozHeaderValue(parsed.roz_analysis orelse return null) orelse return null;
+    if (header.version != analysis.current_version) return null;
+    if (header.plies != parsed.move_count) return null;
+    if (boards.len < parsed.move_count) return null;
+
+    var ga = analysis.GameAnalysis{};
+    for (0..parsed.move_count) |i| {
+        const comment = parsed.comments[i] orelse return null;
+        const roz = parseRozComment(comment, &boards[i]) orelse return null;
+        ga.append(.{
+            // The true after-eval is not persisted; mirror best_eval (no loaded surface
+            // reads .eval — the pass is the only producer of a real after-eval).
+            .eval = roz.best_eval,
+            .best = roz.best,
+            .best_eval = roz.best_eval,
+            .cpl = roz.cpl,
+            .tier = roz.tier,
+        });
+    }
+    // Aggregates come from the cheap header; key moments recompute from stored cpl.
+    ga.blunders = header.blunders;
+    ga.inaccuracies = header.inaccuracies;
+    ga.accuracy = header.accuracy;
+    ga.key_moment_count = analysis.computeKeyMoments(ga.moves[0..ga.count], &ga.key_moments);
+    ga.version = header.version;
+    ga.plies_covered = header.plies;
+    return ga;
 }
 
 // ---------------------------------------------------------------------------
@@ -678,7 +917,7 @@ test "writePgn: short game" {
     };
 
     var buf: [2048]u8 = undefined;
-    const output = try writePgn(&buf, header, &records, &boards);
+    const output = try writePgn(&buf, header, &records, &boards, null);
 
     try std.testing.expect(std.mem.indexOf(u8, output, "[Event \"Test\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "[White \"Alice\"]") != null);
@@ -852,7 +1091,7 @@ test "parsePgn: round-trip writePgn then parsePgn" {
     };
 
     var buf: [4096]u8 = undefined;
-    const pgn_text = try writePgn(&buf, header, &records, &boards);
+    const pgn_text = try writePgn(&buf, header, &records, &boards, null);
 
     const parsed = try parsePgn(pgn_text);
     try std.testing.expectEqual(@as(usize, 4), parsed.move_count);
@@ -935,11 +1174,175 @@ test "writePgn after a take-back omits the taken-back plies (AE2)" {
     // Mirror autoSave: board_history[board_count] holds the current board.
     g.board_history[g.board_count] = g.board;
     var buf: [4096]u8 = undefined;
-    const text = try writePgn(&buf, .{}, g.move_history[0..g.move_count], g.board_history[0 .. g.board_count + 1]);
+    const text = try writePgn(&buf, .{}, g.move_history[0..g.move_count], g.board_history[0 .. g.board_count + 1], null);
 
     try std.testing.expect(std.mem.indexOf(u8, text, "e4") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "e5") != null);
     // The taken-back knight moves must be gone.
     try std.testing.expect(std.mem.indexOf(u8, text, "Nf3") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "2.") == null);
+}
+
+// --- U3: analysis annotation round-trip tests ---
+
+fn buildFourMoveGame(boards: *[5]chess.Board, records: *[4]MoveRecord) void {
+    boards[0] = chess.Board.initial;
+    const move_defs = [_]struct { from: chess.Square, to: chess.Square }{
+        .{ .from = sq(.e, .@"2"), .to = sq(.e, .@"4") },
+        .{ .from = sq(.e, .@"7"), .to = sq(.e, .@"5") },
+        .{ .from = sq(.g, .@"1"), .to = sq(.f, .@"3") },
+        .{ .from = sq(.b, .@"8"), .to = sq(.c, .@"6") },
+    };
+    for (move_defs, 0..) |mv, i| {
+        const m = chess.Move.init(mv.from, mv.to);
+        const piece = boards[i].pieceAt(mv.from);
+        const captured_piece = boards[i].pieceAt(mv.to);
+        records[i] = makeRecord(piece, m, if (captured_piece != .empty) captured_piece else null);
+        boards[i + 1] = chess.makeMove(boards[i], m);
+    }
+}
+
+fn fourMoveAnalysis(records: *const [4]MoveRecord) analysis.GameAnalysis {
+    var ga = analysis.GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = 30 }, .best = records[0].move, .best_eval = .{ .cp = 30 }, .cpl = 0, .tier = .good });
+    ga.append(.{ .eval = .{ .cp = -20 }, .best = records[1].move, .best_eval = .{ .cp = -20 }, .cpl = 10, .tier = null }); // engine ply
+    ga.append(.{ .eval = .{ .mate = 3 }, .best = records[2].move, .best_eval = .{ .mate = 3 }, .cpl = 350, .tier = .bad });
+    ga.append(.{ .eval = .{ .cp = -50 }, .best = records[3].move, .best_eval = .{ .cp = -50 }, .cpl = 60, .tier = .meh });
+    ga.blunders = 1;
+    ga.inaccuracies = 1;
+    ga.accuracy = 75.0;
+    ga.version = analysis.current_version;
+    ga.plies_covered = 4;
+    return ga;
+}
+
+test "writePgn+assembleAnalysis: round-trips tiers, best moves, mate eval (R12)" {
+    var boards: [5]chess.Board = undefined;
+    var records: [4]MoveRecord = undefined;
+    buildFourMoveGame(&boards, &records);
+    const ga = fourMoveAnalysis(&records);
+
+    const header = PgnHeader{ .event = "RoundTrip", .white = "W", .black = "B", .result = "1-0" };
+    var buf: [4096]u8 = undefined;
+    const text = try writePgn(&buf, header, &records, &boards, &ga);
+
+    const parsed = try parsePgn(text);
+    // R12: the 7 standard tags and the movetext SAN are unchanged.
+    try std.testing.expectEqual(@as(usize, 4), parsed.move_count);
+    try std.testing.expectEqualStrings("RoundTrip", parsed.event.?);
+    for (0..4) |i| try std.testing.expect(parsed.moves[i].move.eql(records[i].move));
+
+    const ga2 = assembleAnalysis(&parsed, &boards) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 4), ga2.count);
+    try std.testing.expectEqual(analysis.Eval{ .mate = 3 }, ga2.moves[2].best_eval);
+    try std.testing.expectEqual(@as(?analysis.Tier, .bad), ga2.moves[2].tier);
+    try std.testing.expectEqual(@as(?analysis.Tier, null), ga2.moves[1].tier); // engine ply "-"
+    try std.testing.expect(ga2.moves[2].best.?.eql(records[2].move));
+    try std.testing.expectEqual(@as(i32, 350), ga2.moves[2].cpl);
+    try std.testing.expectEqual(@as(u16, 1), ga2.blunders);
+    try std.testing.expectEqual(@as(u16, 1), ga2.inaccuracies);
+}
+
+test "readAnalysisHeader: cheap scan returns marker + counts" {
+    var boards: [5]chess.Board = undefined;
+    var records: [4]MoveRecord = undefined;
+    buildFourMoveGame(&boards, &records);
+    const ga = fourMoveAnalysis(&records);
+    var buf: [4096]u8 = undefined;
+    const text = try writePgn(&buf, .{}, &records, &boards, &ga);
+
+    const h = readAnalysisHeader(text).?;
+    try std.testing.expectEqual(analysis.current_version, h.version);
+    try std.testing.expectEqual(@as(u16, 4), h.plies);
+    try std.testing.expectEqual(@as(u16, 1), h.blunders);
+    try std.testing.expectEqual(@as(u16, 1), h.inaccuracies);
+    try std.testing.expect(h.accuracy != null);
+}
+
+test "writePgn with null analysis is byte-identical to the un-annotated path" {
+    var boards: [5]chess.Board = undefined;
+    var records: [4]MoveRecord = undefined;
+    buildFourMoveGame(&boards, &records);
+    var buf_plain: [4096]u8 = undefined;
+    const plain = try writePgn(&buf_plain, .{}, &records, &boards, null);
+    // No marker, and the game still parses + has no recoverable analysis.
+    try std.testing.expect(readAnalysisHeader(plain) == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "RozAnalysis") == null);
+    const parsed = try parsePgn(plain);
+    try std.testing.expect(assembleAnalysis(&parsed, &boards) == null);
+}
+
+test "assembleAnalysis: ply-count mismatch fails the completeness gate" {
+    var boards: [5]chess.Board = undefined;
+    var records: [4]MoveRecord = undefined;
+    buildFourMoveGame(&boards, &records);
+    var ga = fourMoveAnalysis(&records);
+    ga.plies_covered = 2; // marker claims 2 plies for a 4-ply game → incomplete
+    var buf: [4096]u8 = undefined;
+    const text = try writePgn(&buf, .{}, &records, &boards, &ga);
+    const parsed = try parsePgn(text);
+    try std.testing.expect(assembleAnalysis(&parsed, &boards) == null);
+}
+
+test "parseMovetext: brace comment attaches to its ply, never errors" {
+    const text =
+        \\[Event "C"]
+        \\[Result "*"]
+        \\
+        \\1. e4 {roz: good best=e4 eval=30 cpl=0} e5 *
+    ;
+    const parsed = try parsePgn(text);
+    try std.testing.expectEqual(@as(usize, 2), parsed.move_count);
+    try std.testing.expect(parsed.comments[0] != null);
+    try std.testing.expect(parsed.comments[1] == null);
+}
+
+test "assembleAnalysis: corrupted roz comment fails the gate but still parses" {
+    const text =
+        \\[Event "B"]
+        \\[Result "*"]
+        \\[RozAnalysis "v1 plies=1 bad=0 meh=0 acc=-"]
+        \\
+        \\1. e4 {roz: good best=Zz9 eval=30 cpl=0} *
+    ;
+    const parsed = try parsePgn(text); // a bad annotation must NOT abort the parse
+    try std.testing.expectEqual(@as(usize, 1), parsed.move_count);
+    var boards = [_]chess.Board{chess.Board.initial};
+    try std.testing.expect(assembleAnalysis(&parsed, &boards) == null);
+}
+
+test "writePgn: a fully-annotated 512-ply game fits the 64 KB write buffer" {
+    var boards: [513]chess.Board = undefined;
+    var records: [512]MoveRecord = undefined;
+    boards[0] = chess.Board.initial;
+    // Legal knight shuffle (g1<->f3 / g8<->f6): cycles indefinitely, no captures/mate.
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        const m = if (i % 2 == 0)
+            (if (i % 4 == 0) chess.Move.init(sq(.g, .@"1"), sq(.f, .@"3")) else chess.Move.init(sq(.f, .@"3"), sq(.g, .@"1")))
+        else
+            (if (i % 4 == 1) chess.Move.init(sq(.g, .@"8"), sq(.f, .@"6")) else chess.Move.init(sq(.f, .@"6"), sq(.g, .@"8")));
+        records[i] = makeRecord(boards[i].pieceAt(m.from), m, null);
+        boards[i + 1] = chess.makeMove(boards[i], m);
+    }
+    var ga = analysis.GameAnalysis{};
+    for (0..512) |k| ga.append(.{ .eval = .{ .cp = 10 }, .best = records[k].move, .best_eval = .{ .cp = 10 }, .cpl = 5, .tier = .good });
+    ga.blunders = 0;
+    ga.inaccuracies = 0;
+    ga.accuracy = 99.0;
+    ga.version = analysis.current_version;
+    ga.plies_covered = 512;
+
+    var buf: [64 * 1024]u8 = undefined;
+    const text = try writePgn(&buf, .{}, &records, &boards, &ga);
+    try std.testing.expect(text.len < buf.len);
+}
+
+test "writePgn: too-small buffer returns BufferTooSmall, never overflows" {
+    var boards: [5]chess.Board = undefined;
+    var records: [4]MoveRecord = undefined;
+    buildFourMoveGame(&boards, &records);
+    const ga = fourMoveAnalysis(&records);
+    var tiny: [16]u8 = undefined;
+    try std.testing.expectError(error.BufferTooSmall, writePgn(&tiny, .{}, &records, &boards, &ga));
 }

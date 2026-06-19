@@ -313,6 +313,7 @@ fn autoSave(
         header,
         game_state.move_history[0..game_state.move_count],
         game_state.board_history[0 .. game_state.board_count + 1],
+        null,
     ) catch {
         log.warn("failed to serialize PGN for auto-save", .{});
         return;
