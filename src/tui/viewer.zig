@@ -112,6 +112,24 @@ pub const ViewerState = struct {
         self.position = if (target <= self.total) target else self.total;
     }
 
+    /// Jump to the worst player move — the first swing-ranked key moment that is a
+    /// player mistake/blunder — for the summary card's jump-into-review (R8). No-op
+    /// without analysis or player mistakes.
+    pub fn jumpToWorstMove(self: *ViewerState) void {
+        const ga = self.analysis orelse return;
+        var i: usize = 0;
+        while (i < ga.key_moment_count) : (i += 1) {
+            const ply = ga.key_moments[i];
+            if (ply >= ga.count) continue;
+            const t = ga.moves[ply].tier orelse continue;
+            if (t == .bad) {
+                self.key_moment_idx = i;
+                self.jumpToKeyMoment(ga, i);
+                return;
+            }
+        }
+    }
+
     pub fn currentBoard(self: *const ViewerState) *const chess.Board {
         return &self.boards[self.position];
     }
@@ -367,4 +385,25 @@ test "moveLabel maps centipawn loss to lichess vocabulary" {
     try std.testing.expectEqualStrings("inaccuracy", moveLabel(50));
     try std.testing.expectEqualStrings("mistake", moveLabel(100));
     try std.testing.expectEqualStrings("blunder", moveLabel(300));
+}
+
+test "jumpToWorstMove lands on the first player mistake by swing rank" {
+    var boards: [5]chess.Board = undefined;
+    boards[0] = chess.Board.initial;
+    var sans: [4]pgn.SanNotation = undefined;
+    var ga = analysis_mod.GameAnalysis{};
+    ga.count = 4;
+    ga.key_moment_count = 3;
+    ga.key_moments[0] = 2;
+    ga.moves[2].tier = null; // engine ply (biggest swing) — skipped
+    ga.key_moments[1] = 0;
+    ga.moves[0].tier = .good; // not a mistake — skipped
+    ga.key_moments[2] = 3;
+    ga.moves[3].tier = .bad; // the worst player move
+    var v = ViewerState.init(&boards, &sans, 4);
+    v.analysis = &ga;
+    v.analysis_state = .ready;
+    v.jumpToWorstMove();
+    try std.testing.expectEqual(@as(?usize, 2), v.key_moment_idx);
+    try std.testing.expectEqual(@as(usize, 4), v.position); // ply 3 + 1
 }

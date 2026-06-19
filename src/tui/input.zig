@@ -10,6 +10,7 @@ pub const Action = enum {
     new_game,
     toggle_hints,
     undo,
+    review,
 };
 
 /// Resolve a Y/N modal keypress: true = confirm (y/enter), false = cancel
@@ -129,7 +130,7 @@ pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
             game.resign_pending = true;
             return .render;
         }
-        return .none;
+        return .review; // on a finished game, R opens the analysis review
     }
     if (key.matches('f', .{})) {
         game.flipBoard();
@@ -203,6 +204,15 @@ test "input: n on a finished game returns to menu instantly" {
     game.game_phase = .ended;
     try std.testing.expectEqual(Action.new_game, handleKeyPress(&game, fakeKey('n', .{})));
     try std.testing.expect(!game.leave_pending);
+}
+
+test "input: r reviews a finished game, resigns an in-progress one" {
+    var game = Game.init();
+    try std.testing.expectEqual(Action.render, handleKeyPress(&game, fakeKey('r', .{})));
+    try std.testing.expect(game.resign_pending);
+    var ended = Game.init();
+    ended.game_phase = .ended;
+    try std.testing.expectEqual(Action.review, handleKeyPress(&ended, fakeKey('r', .{})));
 }
 
 test "input: q during promotion does not open a hidden quit confirm" {

@@ -529,7 +529,7 @@ fn runGameHistory(
                     .select_finished => {
                         if (screen.selectedGame()) |g| {
                             selected_filepath.* = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch null;
-                            const viewer_result = runGameViewer(io, alloc, loop_ptr, vx, tty, selected_filepath.*, stockfish_path);
+                            const viewer_result = runGameViewer(io, alloc, loop_ptr, vx, tty, selected_filepath.*, stockfish_path, false);
                             if (viewer_result == .back_to_menu) return .back;
                         }
                     },
@@ -607,6 +607,7 @@ fn runGameViewer(
     tty: *vaxis.Tty,
     filepath: ?[]const u8,
     stockfish_path: ?[]const u8,
+    start_at_worst: bool,
 ) ViewerResult {
     const fp = filepath orelse return .back_to_history;
     const pgn_content = storage.loadGame(alloc, io, fp) catch return .back_to_history;
@@ -647,6 +648,7 @@ fn runGameViewer(
         analysis_storage = cached;
         viewer.analysis = &analysis_storage;
         viewer.analysis_state = .ready;
+        if (start_at_worst) viewer.jumpToWorstMove();
     } else if (stockfish_path) |sp| {
         review_engine = engine_mod.Engine.init(io, sp, 20) catch null;
         if (review_engine) |*e| {
@@ -697,6 +699,7 @@ fn runGameViewer(
                 if (!pass_failed) {
                     viewer.analysis = &analysis_storage;
                     viewer.analysis_state = .ready;
+                    if (start_at_worst) viewer.jumpToWorstMove();
                     if (filepath) |path| {
                         writeBackViewerAnalysis(io, path, &parsed, records[0..move_count], boards[0 .. move_count + 1], &analysis_storage);
                     }
@@ -1083,6 +1086,13 @@ pub fn main(init: std.process.Init) !void {
                                     }
                                     log.debug("dispatching engine move (engine turn, idle)", .{});
                                     dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
+                                }
+                            },
+                            .review => {
+                                if (game_state.analysis_state == .ready) {
+                                    if (current_save_path) |path| {
+                                        _ = runGameViewer(io, alloc, &loop, &vx, &tty, path, stockfish_path, true);
+                                    }
                                 }
                             },
                             .none => {},

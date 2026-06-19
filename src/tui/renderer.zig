@@ -541,6 +541,77 @@ fn renderPromotionStatus(win: Window, x: u16, y: u16, pp: game_mod.PromotionPend
     }
 }
 
+/// Game-end summary card (U7): led by mistake/inaccuracy counts, worst moves, and a
+/// secondary accuracy figure, with a review hint. Replaces the captured/opening/
+/// move-history panel content on the ended screen. Shows pending/failed states while
+/// the background pass runs or after it fails.
+fn renderSummaryCard(win: Window, game: *const Game, y_in: u16) void {
+    var y = y_in;
+    switch (game.analysis_state) {
+        .none => return,
+        .pending => {
+            _ = writeStr(win, 1, y, "Analyzing\u{2026}", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            return;
+        },
+        .failed => {
+            _ = writeStr(win, 1, y, "Analysis unavailable", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            return;
+        },
+        .ready => {},
+    }
+    const ga = &game.analysis;
+
+    y += 1;
+    _ = writeStr(win, 1, y, "REVIEW", .{ .fg = Theme.text_primary, .bg = Theme.bg });
+    y += 1;
+
+    // Counts lead (R8).
+    var col = writeStr(win, 1, y, "Mistakes ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    _ = writeNum(win, col, y, ga.blunders, .{ .fg = Theme.eval_bad, .bg = Theme.bg });
+    y += 1;
+    col = writeStr(win, 1, y, "Inaccurate ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    _ = writeNum(win, col, y, ga.inaccuracies, .{ .fg = Theme.eval_meh, .bg = Theme.bg });
+    y += 1;
+
+    // Accuracy is secondary; "\u{2014}" (em dash) when the player made no rated move.
+    col = writeStr(win, 1, y, "Accuracy ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    if (ga.accuracy) |acc| {
+        var abuf: [8]u8 = undefined;
+        const s = std.fmt.bufPrint(&abuf, "{d:.0}%", .{acc}) catch "?";
+        _ = writeStr(win, col, y, s, .{ .fg = Theme.text_primary, .bg = Theme.bg });
+    } else {
+        _ = writeStr(win, col, y, "\u{2014}", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    }
+    y += 2;
+
+    _ = writeStr(win, 1, y, "Worst moves", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    y += 1;
+    var shown: u8 = 0;
+    var ki: usize = 0;
+    while (ki < ga.key_moment_count and shown < 3) : (ki += 1) {
+        const ply = ga.key_moments[ki];
+        if (ply >= ga.count) continue;
+        const t = ga.moves[ply].tier orelse continue;
+        if (t != .bad) continue; // player mistakes/blunders only
+        const move_num: u16 = @intCast(ply / 2 + 1);
+        var c = writeNum(win, 1, y, move_num, .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        c = writeStr(win, c, y, if (ply % 2 == 0) ". " else "\u{2026} ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        if (ply < game.move_count) {
+            _ = writeStr(win, c, y, game.fan_history[ply].slice(), .{ .fg = Theme.eval_bad, .bg = Theme.bg });
+        }
+        y += 1;
+        shown += 1;
+    }
+    if (shown == 0) {
+        _ = writeStr(win, 1, y, "None \u{2014} clean game!", .{ .fg = Theme.eval_good, .bg = Theme.bg });
+    }
+}
+
+fn renderEndedHints(win: Window) void {
+    const hint_y = win.height -| 2;
+    _ = writeStr(win, 1, hint_y, "R Review  N Menu  Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+}
+
 pub fn renderInfoPanel(win: Window, game: *const Game) void {
     win.fill(.{ .style = .{ .bg = Theme.bg } });
 
@@ -571,6 +642,9 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
             _ = writeStr(win, 1, y, result, .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         }
         y += 1;
+        renderSummaryCard(win, game, y);
+        renderEndedHints(win);
+        return;
     } else if (game.engine_state == .thinking) {
         const spinners = [_][]const u8{ "|", "/", "-", "\\" };
         var col = writeStr(win, 1, y, spinners[game.spinner_idx], .{ .fg = Theme.highlight_cursor, .bg = Theme.bg });
