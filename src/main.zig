@@ -106,7 +106,7 @@ fn engineWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Engin
 
 fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *EngineResult, event_loop: *vaxis.Loop(Event)) void {
     hints_log.debug("background analysis started", .{});
-    const analysis = eng.analyze(board, 500) catch {
+    const analysis = eng.analyzeFullStrength(board, 500) catch {
         hints_log.warn("background analysis failed", .{});
         result.failed = true;
         event_loop.postEvent(.engine_analysis_ready) catch {};
@@ -533,10 +533,17 @@ pub fn main(init: std.process.Init) !void {
     const opening_book = try alloc.create(openings.OpeningBook);
     opening_book.* = openings.OpeningBook.init();
 
+    // Seeded once at startup: re-seeding per move would be deterministic. Used by the
+    // beginner move handicap (U2). std.crypto.random is absent in this Zig; the time
+    // idiom mirrors the random-color pick below.
+    const seed_ns: u96 = @bitCast(Io.Timestamp.now(io, .real).nanoseconds);
+    var prng = std.Random.DefaultPrng.init(@truncate(seed_ns));
+    const rng = prng.random();
+
     main_loop: while (true) {
         // --- Crash recovery: scan for unfinished games ---
         var resume_filepath: ?[]const u8 = null;
-        var resume_elo: u16 = prefs.default_elo;
+        var resume_elo: u16 = engine_mod.skillToElo(prefs.default_skill_level);
         var resume_color: chess.Color = .white;
 
         if (data_dir) |dd| {
@@ -558,7 +565,12 @@ pub fn main(init: std.process.Init) !void {
 
         // --- Menu phase ---
         var menu_state = Menu{};
-        menu_state.selected_elo = prefs.default_elo;
+        menu_state.selected_skill = prefs.default_skill_level;
+        menu_state.selected_theme = renderer.ThemeId.fromString(prefs.theme);
+        // Apply the palette per menu-entry (not once before the loop) so the global
+        // palette always matches the freshly-initialized selector, re-normalizing a
+        // previewed-but-unstarted theme on the next menu entry.
+        renderer.Theme = renderer.palette(menu_state.selected_theme);
         menu_state.selected_color = PlayerColor.fromString(prefs.default_color);
         menu_state.has_resume_game = resume_filepath != null;
         menu_state.initActiveField();
@@ -567,6 +579,11 @@ pub fn main(init: std.process.Init) !void {
         var menu_action: MenuAction = .none;
 
         while (!menu_done) {
+            const win = vx.window();
+            win.clear();
+            menu_state.render(win);
+            try vx.render(tty.writer());
+
             const event = try loop.nextEvent();
             switch (event) {
                 .key_press => |key| {
@@ -593,13 +610,13 @@ pub fn main(init: std.process.Init) !void {
                                     // Parse the selected game to extract elo and color for resume
                                     const basename = if (std.mem.lastIndexOfScalar(u8, fp, '/')) |idx| fp[idx + 1 ..] else fp;
                                     resume_filepath = fp;
-                                    resume_elo = prefs.default_elo;
+                                    resume_elo = engine_mod.skillToElo(prefs.default_skill_level);
                                     resume_color = .white;
                                     // Extract elo and color from filename
                                     if (std.mem.indexOf(u8, basename, "_elo")) |elo_start| {
                                         const after_elo = basename[elo_start + 4 ..];
                                         if (std.mem.indexOf(u8, after_elo, "_s")) |color_sep| {
-                                            resume_elo = std.fmt.parseInt(u16, after_elo[0..color_sep], 10) catch prefs.default_elo;
+                                            resume_elo = std.fmt.parseInt(u16, after_elo[0..color_sep], 10) catch engine_mod.skillToElo(prefs.default_skill_level);
                                             const color_part = after_elo[color_sep + 2 ..];
                                             const color_end = std.mem.indexOf(u8, color_part, ".") orelse color_part.len;
                                             if (std.mem.eql(u8, color_part[0..color_end], "black")) {
@@ -620,20 +637,17 @@ pub fn main(init: std.process.Init) !void {
                 },
                 else => {},
             }
-
-            const win = vx.window();
-            win.clear();
-            menu_state.render(win);
-            try vx.render(tty.writer());
         }
 
         // --- Save preferences if changed ---
         if (menu_action == .start) {
             const menu_config = menu_state.getConfig();
             const menu_color_str = menu_config.player_color.toString();
-            if (menu_config.elo != prefs.default_elo or !std.mem.eql(u8, menu_color_str, prefs.default_color)) {
-                prefs.default_elo = menu_config.elo;
+            const menu_theme_str = menu_config.theme_id.toString();
+            if (menu_config.skill_level != prefs.default_skill_level or !std.mem.eql(u8, menu_color_str, prefs.default_color) or !std.mem.eql(u8, menu_theme_str, prefs.theme)) {
+                prefs.default_skill_level = menu_config.skill_level;
                 prefs.default_color = menu_color_str;
+                prefs.theme = menu_theme_str;
                 if (config_dir) |cd| config.savePreferences(alloc, io, prefs, cd) catch {};
             }
         }
@@ -650,6 +664,7 @@ pub fn main(init: std.process.Init) !void {
 
         var game_state: Game = undefined;
         var game_elo: u16 = undefined;
+        var game_skill: u8 = undefined;
         var player_color: chess.Color = undefined;
         var current_save_path: ?[]const u8 = null;
         var game_start_secs: i64 = undefined;
@@ -668,6 +683,7 @@ pub fn main(init: std.process.Init) !void {
             };
 
             game_elo = resume_elo;
+            game_skill = engine_mod.eloToSkill(resume_elo);
             player_color = resume_color;
             current_save_path = filepath;
 
@@ -680,7 +696,7 @@ pub fn main(init: std.process.Init) !void {
             // Extract date from filename for continued saves
             game_start_secs = @intCast(@divTrunc(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
 
-            current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
+            current_engine = engine_mod.Engine.init(io, stockfish_path, game_skill) catch {
                 continue :main_loop;
             };
             if (current_engine) |*eng| eng.relocate();
@@ -689,9 +705,10 @@ pub fn main(init: std.process.Init) !void {
         } else {
             // --- New game flow ---
             const game_config = menu_state.getConfig();
-            game_elo = game_config.elo;
+            game_skill = game_config.skill_level;
+            game_elo = engine_mod.skillToElo(game_skill);
 
-            current_engine = engine_mod.Engine.init(io, stockfish_path, game_elo) catch {
+            current_engine = engine_mod.Engine.init(io, stockfish_path, game_skill) catch {
                 continue :main_loop;
             };
             if (current_engine) |*eng| eng.relocate();
@@ -780,6 +797,20 @@ pub fn main(init: std.process.Init) !void {
                                     game_state.clearHints();
                                 }
                             },
+                            .undo => {
+                                // A hint search for the pre-undo board may still be in
+                                // flight; cancel it first so it can't land a stale
+                                // hint_best_move on the restored position (R4).
+                                if (current_engine) |*eng| {
+                                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                                }
+                                if (game_state.hints_enabled) {
+                                    game_state.computeEndangered();
+                                    if (current_engine) |*eng| {
+                                        dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
+                                    }
+                                }
+                            },
                             .render => {
                                 game_state.tickFlash();
                                 game_state.tickEngineHighlight();
@@ -812,7 +843,16 @@ pub fn main(init: std.process.Init) !void {
                                 };
                                 dispatchEngineMove(io, eng, &game_state, &engine_board, &engine_result, &engine_future, &loop);
                             }
-                        } else if (engine_result.move) |move| {
+                        } else if (engine_result.move) |engine_move| {
+                            // Beginner handicap (U2): at the lowest skill levels, sometimes
+                            // play a random legal move instead of the engine's pick. Confined
+                            // to this opponent-move seam so aids/hints stay full strength (R14).
+                            var move = engine_move;
+                            if (current_engine) |*eng| {
+                                if (engine_mod.shouldHandicap(eng.skill, rng)) {
+                                    if (engine_mod.pickHandicapMove(&game_state.board, rng)) |hm| move = hm;
+                                }
+                            }
                             var move_buf: [5]u8 = undefined;
                             const uci = move.toUci(&move_buf);
                             log.debug("engine move received: {s}", .{uci});
@@ -858,12 +898,22 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // Auto-save after new moves
-            if (game_state.move_count > prev_move_count) {
-                log.debug("move #{d} detected, triggering auto-save", .{game_state.move_count});
+            // Auto-save on any move-count change: forward moves rewrite the save, and
+            // take-backs rewrite it to the remaining moves (or delete it at zero).
+            if (game_state.move_count != prev_move_count) {
                 prev_move_count = game_state.move_count;
-                if (data_dir) |dd| autoSave(io, alloc, &game_state, dd, &current_save_path, game_elo, player_color, game_start_secs);
-                log.debug("auto-save completed for move #{d}", .{game_state.move_count});
+                if (data_dir) |dd| {
+                    if (game_state.move_count == 0) {
+                        // Undone to the initial position: remove the save so crash
+                        // recovery won't resurface it, and clear the resume pointer.
+                        if (current_save_path) |p| {
+                            storage.deleteGame(io, p) catch {};
+                            current_save_path = null;
+                        }
+                    } else {
+                        autoSave(io, alloc, &game_state, dd, &current_save_path, game_elo, player_color, game_start_secs);
+                    }
+                }
             }
 
             // Update thinking timer for display

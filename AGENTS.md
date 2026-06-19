@@ -1,12 +1,12 @@
 # Rozinante
 
-Terminal chess learning game in Zig: play Stockfish at a chosen Elo with togglable learning aids (endangered-piece highlighting, best-move hints, opening identification), save games to PGN, and replay with per-move engine analysis. Also a vehicle for learning Zig — the code favors clarity over maximum optimization.
+Terminal chess learning game in Zig: play Stockfish at a chosen difficulty (a single Skill Level dial, beginner to full strength) with togglable learning aids (endangered-piece highlighting, full-strength best-move hints, opening identification), unlimited take-back, selectable board themes, save games to PGN, and replay with per-move engine analysis. Also a vehicle for learning Zig — the code favors clarity over maximum optimization.
 
 ## Build & test
 
 - `zig build` — compile the `rozinante` executable
 - `zig build run` — build and run
-- `zig build test` — all tests (module + executable passes, run in parallel); 242 currently pass
+- `zig build test` — all tests (module + executable passes, run in parallel); 274 currently pass
 - `zig build preview` — piece sprite preview and the highlight-mark gallery (every state, combo, light/dark, with/without a piece, plus a legend; needs a terminal at least ~104×64)
 
 ## Stack

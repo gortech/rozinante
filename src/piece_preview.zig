@@ -3,7 +3,7 @@ const vaxis = @import("vaxis");
 const rozinante = @import("rozinante");
 const sprites = rozinante.tui.sprites;
 const renderer = rozinante.tui.renderer;
-const Theme = renderer.Theme;
+const Theme = &renderer.Theme;
 const Marks = renderer.Marks;
 const chess = rozinante.chess;
 
@@ -11,6 +11,7 @@ pub const Panic = std.debug.FullPanic(panicHandler);
 
 var global_tty: ?vaxis.Tty = null;
 var global_vx: ?vaxis.Vaxis = null;
+var preview_theme: renderer.ThemeId = .classic;
 
 fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
     if (global_tty) |*tty| {
@@ -105,6 +106,10 @@ pub fn main(init: std.process.Init) !void {
         switch (event) {
             .key_press => |key| {
                 if (key.codepoint == 'q') break;
+                if (key.codepoint == 't') {
+                    preview_theme = preview_theme.next();
+                    renderer.Theme = renderer.palette(preview_theme);
+                }
             },
             .winsize => |ws| {
                 try vx.resize(alloc, tty.writer(), ws);
@@ -127,7 +132,8 @@ fn render(win: vaxis.Window) void {
     const primary: vaxis.Cell.Style = .{ .fg = Theme.text_primary, .bg = Theme.bg };
 
     _ = renderer.writeStr(win, 0, 0, "Rozinante preview", primary);
-    _ = renderer.writeStr(win, 60, 0, "q: quit", dim);
+    const thx = renderer.writeStr(win, 60, 0, "q: quit  t: ", dim);
+    _ = renderer.writeStr(win, thx, 0, preview_theme.label(), primary);
 
     // --- piece sprite preview ---
     const sp_label: u16 = 2;

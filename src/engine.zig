@@ -25,7 +25,7 @@ pub const Analysis = struct {
 pub const Engine = struct {
     child: process.Child,
     io: Io,
-    elo: u16,
+    skill: u8,
     is_ready: bool,
     stockfish_path: []const u8,
 
@@ -34,7 +34,7 @@ pub const Engine = struct {
     stdin_writer: File.Writer,
     stdout_reader: File.Reader,
 
-    pub fn init(io: Io, stockfish_path: []const u8, elo: u16) !Engine {
+    pub fn init(io: Io, stockfish_path: []const u8, skill: u8) !Engine {
         const child = try process.spawn(io, .{
             .argv = &.{stockfish_path},
             .stdin = .pipe,
@@ -45,7 +45,7 @@ pub const Engine = struct {
         var engine = Engine{
             .child = child,
             .io = io,
-            .elo = elo,
+            .skill = skill,
             .is_ready = false,
             .stockfish_path = stockfish_path,
             .stdin_buf = undefined,
@@ -59,7 +59,7 @@ pub const Engine = struct {
 
         try engine.uciHandshake();
 
-        log.info("engine initialized: path={s} elo={d}", .{ stockfish_path, elo });
+        log.info("engine initialized: path={s} skill={d}", .{ stockfish_path, skill });
 
         return engine;
     }
@@ -82,11 +82,7 @@ pub const Engine = struct {
         try self.sendCommand("uci");
         try self.readUntilToken("uciok");
 
-        try self.sendCommand("setoption name UCI_LimitStrength value true");
-
-        var elo_val_buf: [64]u8 = undefined;
-        const elo_val_cmd = std.fmt.bufPrint(&elo_val_buf, "setoption name UCI_Elo value {d}", .{self.elo}) catch unreachable;
-        try self.sendCommand(elo_val_cmd);
+        try self.setSkillLevel(self.skill);
 
         try self.waitReady();
     }
@@ -137,8 +133,9 @@ pub const Engine = struct {
             return EngineError.InvalidUciResponse;
         try self.sendCommand(pos_cmd);
 
+        const elo = skillToElo(self.skill);
         var go_buf: [64]u8 = undefined;
-        const go_cmd = std.fmt.bufPrint(&go_buf, "go depth {d} movetime {d}", .{ eloToDepth(self.elo), eloToMovetime(self.elo) }) catch
+        const go_cmd = std.fmt.bufPrint(&go_buf, "go depth {d} movetime {d}", .{ eloToDepth(elo), eloToMovetime(elo) }) catch
             return EngineError.InvalidUciResponse;
         try self.sendCommand(go_cmd);
 
@@ -196,6 +193,22 @@ pub const Engine = struct {
             }
         }
         return EngineError.EngineTimeout;
+    }
+
+    fn setSkillLevel(self: *Engine, level: u8) !void {
+        var buf: [64]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&buf, "setoption name Skill Level value {d}", .{level}) catch unreachable;
+        try self.sendCommand(cmd);
+    }
+
+    /// Analyze at full strength regardless of the configured skill: raise Skill Level
+    /// to 20 for the search and restore the configured skill on every exit path. Safe
+    /// because hints fire only on the human's turn and cancelAnalysis precedes every
+    /// opponent getMove, so the raise never overlaps the opponent search on this engine.
+    pub fn analyzeFullStrength(self: *Engine, board: *const Board, movetime_ms: u32) !Analysis {
+        try self.setSkillLevel(20);
+        defer self.setSkillLevel(self.skill) catch {};
+        return self.analyze(board, movetime_ms);
     }
 
     pub fn stop(self: *Engine) void {
@@ -320,6 +333,56 @@ pub fn eloToMovetime(elo: u16) u16 {
     return 12000;
 }
 
+// Skill Level (0..20) <-> approximate CCRL Elo. Skill Level (not UCI_Elo) is the
+// strength lever Stockfish exposes; UCI_Elo floors at ~1320, so the genuine-beginner
+// floor is added app-side (see the move handicap). The Elo here is shown beside the
+// dial and written to the save filename, and feeds eloToDepth/eloToMovetime.
+const skill_elo_table = [_]u16{
+    1320, 1418, 1517, 1615, 1714, 1812, 1911, 2009, 2108, 2206,
+    2305, 2403, 2502, 2600, 2698, 2797, 2895, 2994, 3092, 3191,
+    3500,
+};
+
+pub fn skillToElo(skill: u8) u16 {
+    return skill_elo_table[@min(skill, 20)];
+}
+
+pub fn eloToSkill(elo: u16) u8 {
+    var best: u8 = 0;
+    var best_diff: u32 = std.math.maxInt(u32);
+    for (skill_elo_table, 0..) |e, s| {
+        const diff: u32 = if (e > elo) e - elo else elo - e;
+        if (diff < best_diff) {
+            best_diff = diff;
+            best = @intCast(s);
+        }
+    }
+    return best;
+}
+
+// --- Beginner move handicap ---
+// Stockfish at Skill Level 0 still plays ~club strength, below which no UCI option
+// reaches. The lowest skill levels therefore occasionally substitute a uniformly
+// random legal move for the engine's pick. ponytail: uniform random is the floor
+// lever; swap for a blunder-weighted pick only if calibration shows it feels erratic.
+const handicap_table = [_]u8{ 80, 55, 35, 18 }; // percent, by skill 0..3; 0 above.
+
+pub fn handicapRate(skill: u8) u8 {
+    return if (skill < handicap_table.len) handicap_table[skill] else 0;
+}
+
+pub fn shouldHandicap(skill: u8, rng: std.Random) bool {
+    const rate = handicapRate(skill);
+    if (rate == 0) return false;
+    return rng.uintLessThan(u8, 100) < rate;
+}
+
+pub fn pickHandicapMove(board: *const Board, rng: std.Random) ?Move {
+    const legal = chess.legalMoves(board);
+    if (legal.len == 0) return null;
+    return legal.moves[rng.uintLessThan(usize, legal.len)];
+}
+
 // --- Tests ---
 
 test "parseBestMove: standard move" {
@@ -409,6 +472,35 @@ test "eloToMovetime: at 1000 returns 120ms" {
     try std.testing.expectEqual(@as(u16, 120), eloToMovetime(1000));
 }
 
+test "skillToElo: floor, ceiling, and clamp" {
+    try std.testing.expectEqual(@as(u16, 1320), skillToElo(0));
+    try std.testing.expectEqual(@as(u16, 3500), skillToElo(20));
+    try std.testing.expectEqual(@as(u16, 3500), skillToElo(99));
+}
+
+test "skillToElo: monotonically non-decreasing" {
+    var prev: u16 = 0;
+    var s: u8 = 0;
+    while (s <= 20) : (s += 1) {
+        const e = skillToElo(s);
+        try std.testing.expect(e >= prev);
+        prev = e;
+    }
+}
+
+test "eloToSkill: anchors and legacy clamp" {
+    try std.testing.expectEqual(@as(u8, 0), eloToSkill(1320));
+    try std.testing.expectEqual(@as(u8, 0), eloToSkill(1200));
+    try std.testing.expectEqual(@as(u8, 20), eloToSkill(3500));
+}
+
+test "eloToSkill: round-trips skillToElo" {
+    var s: u8 = 0;
+    while (s <= 20) : (s += 1) {
+        try std.testing.expectEqual(s, eloToSkill(skillToElo(s)));
+    }
+}
+
 test "Move.fromUci: promotion round-trip" {
     const m = Move.fromUci("e7e8q").?;
     try std.testing.expectEqual(chess.MoveType.promotion, m.move_type);
@@ -426,4 +518,59 @@ test "findStockfish: function signature compiles" {
     // findStockfish requires a real Io from main(); we can only verify it compiles.
     // Integration testing with Stockfish is done via the game loop.
     try std.testing.expect(@TypeOf(findStockfish) == fn (Io, ?[]const u8) EngineError![]const u8);
+}
+
+test "handicapRate: high at floor, zero above threshold, non-increasing" {
+    try std.testing.expect(handicapRate(0) > 0);
+    try std.testing.expectEqual(@as(u8, 0), handicapRate(20));
+    var prev: u8 = 255;
+    var s: u8 = 0;
+    while (s <= 20) : (s += 1) {
+        try std.testing.expect(handicapRate(s) <= prev);
+        prev = handicapRate(s);
+    }
+}
+
+test "shouldHandicap: never fires above threshold" {
+    var prng = std.Random.DefaultPrng.init(0xABCDEF);
+    const rng = prng.random();
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        try std.testing.expect(!shouldHandicap(20, rng));
+    }
+}
+
+test "shouldHandicap: fires often at skill 0" {
+    var prng = std.Random.DefaultPrng.init(0xABCDEF);
+    const rng = prng.random();
+    var fires: usize = 0;
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        if (shouldHandicap(0, rng)) fires += 1;
+    }
+    try std.testing.expect(fires > 500);
+}
+
+test "pickHandicapMove: returns a legal move (initial position)" {
+    var prng = std.Random.DefaultPrng.init(0x1234);
+    const rng = prng.random();
+    const board = Board.initial;
+    const m = pickHandicapMove(&board, rng).?;
+    const legal = chess.legalMoves(&board);
+    var found = false;
+    for (legal.moves[0..legal.len]) |lm| {
+        if (lm.eql(m)) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "pickHandicapMove: single legal move returns it" {
+    var prng = std.Random.DefaultPrng.init(0x9999);
+    const rng = prng.random();
+    // White Ka1, Black Kc1 + Rb8: the only legal move is Ka1-a2.
+    const board = Board.fromFen("1r6/8/8/8/8/8/8/K1k5 w - - 0 1").?;
+    const legal = chess.legalMoves(&board);
+    try std.testing.expectEqual(@as(usize, 1), legal.len);
+    const m = pickHandicapMove(&board, rng).?;
+    try std.testing.expect(m.eql(legal.moves[0]));
 }

@@ -29,6 +29,8 @@ Each submodule is single-responsibility; a barrel file re-exports each directory
 
 - **TUI uses the low-level vaxis API, not vxfw.** The chess board is a custom grid renderer, not a composable widget tree; the low-level API gives full cell control for multi-row squares, colored highlights, and inline promotion UI. Revisit only if later work needs complex widget composition.
 - **Persistence is a three-module layout** (`pgn.zig` format, `storage.zig` I/O, `config.zig` JSON prefs) behind the `persistence.zig` barrel, mirroring `src/chess/` and `src/tui/`. Each module is testable independently; `pgn.zig` has no filesystem dependencies.
+- **Difficulty is Stockfish `Skill Level` (0–20), not `UCI_Elo`.** `UCI_Elo` floors at ~1320 CCRL, so the genuine-beginner floor is an app-side handicap that, at the lowest skills, substitutes a uniformly-random legal move for the engine's pick (seeded once at startup). The save filename keeps a CCRL-Elo field (via `skillToElo`) so the storage format is unchanged; resume maps it back with `eloToSkill`. Best-move hints momentarily raise `Skill Level` to 20 on the shared engine and restore it via `defer` — safe because hints never overlap the opponent search.
+- **Theme is a runtime `var Palette`** (`renderer.Theme`) swapped wholesale by the menu selector for live preview; the container-scope `Theme` aliases in `menu/history/viewer/piece_preview` are *pointer* aliases (`&renderer.Theme`) so every render site reads the live palette. Classic reproduces the original RGBs exactly.
 
 ## Status & roadmap
 

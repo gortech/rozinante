@@ -922,3 +922,24 @@ test "parsePgn: invalid SAN in movetext returns error" {
     ;
     try std.testing.expectError(error.InvalidSan, parsePgn(pgn));
 }
+
+test "writePgn after a take-back omits the taken-back plies (AE2)" {
+    var g = game.Game.init();
+    g.executeMove(chess.Square.init(.e, .@"2"), chess.Square.init(.e, .@"4"), null);
+    g.executeMove(chess.Square.init(.e, .@"7"), chess.Square.init(.e, .@"5"), null);
+    g.executeMove(chess.Square.init(.g, .@"1"), chess.Square.init(.f, .@"3"), null);
+    g.executeMove(chess.Square.init(.b, .@"8"), chess.Square.init(.c, .@"6"), null);
+    g.undoMovePair();
+    try std.testing.expectEqual(@as(usize, 2), g.move_count);
+
+    // Mirror autoSave: board_history[board_count] holds the current board.
+    g.board_history[g.board_count] = g.board;
+    var buf: [4096]u8 = undefined;
+    const text = try writePgn(&buf, .{}, g.move_history[0..g.move_count], g.board_history[0 .. g.board_count + 1]);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "e4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "e5") != null);
+    // The taken-back knight moves must be gone.
+    try std.testing.expect(std.mem.indexOf(u8, text, "Nf3") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "2.") == null);
+}

@@ -8,24 +8,100 @@ const game_mod = @import("game.zig");
 const Game = game_mod.Game;
 const sprites = @import("sprites.zig");
 
-pub const Theme = struct {
-    pub const bg: Color = .{ .rgb = .{ 15, 15, 35 } };
-    pub const dark_square: Color = .{ .rgb = .{ 55, 40, 100 } };
-    pub const light_square: Color = .{ .rgb = .{ 105, 70, 150 } };
-    pub const white_piece: Color = .{ .rgb = .{ 200, 200, 220 } };
-    pub const black_piece: Color = .{ .rgb = .{ 20, 20, 40 } };
-    pub const text_primary: Color = .{ .rgb = .{ 192, 202, 245 } };
-    pub const text_dim: Color = .{ .rgb = .{ 100, 110, 150 } };
-    pub const highlight_cursor: Color = .{ .rgb = .{ 255, 0, 255 } };
-    pub const highlight_selected: Color = .{ .rgb = .{ 180, 0, 255 } };
-    pub const highlight_legal: Color = .{ .rgb = .{ 0, 200, 255 } };
-    pub const highlight_check: Color = .{ .rgb = .{ 255, 50, 50 } };
-    pub const highlight_flash: Color = .{ .rgb = .{ 255, 0, 0 } };
-    pub const highlight_promotion: Color = .{ .rgb = .{ 255, 200, 0 } };
-    pub const highlight_engine_move: Color = .{ .rgb = .{ 0, 220, 180 } };
-    pub const highlight_endangered: Color = .{ .rgb = .{ 255, 100, 50 } };
-    pub const highlight_hint_best: Color = .{ .rgb = .{ 50, 200, 100 } };
+pub const Palette = struct {
+    bg: Color,
+    dark_square: Color,
+    light_square: Color,
+    white_piece: Color,
+    black_piece: Color,
+    text_primary: Color,
+    text_dim: Color,
+    highlight_cursor: Color,
+    highlight_selected: Color,
+    highlight_legal: Color,
+    highlight_check: Color,
+    highlight_flash: Color,
+    highlight_promotion: Color,
+    highlight_engine_move: Color,
+    highlight_endangered: Color,
+    highlight_hint_best: Color,
+    selection_bg: Color,
 };
+
+pub const ThemeId = enum {
+    classic,
+    wood,
+    green,
+    blue,
+
+    pub fn label(self: ThemeId) []const u8 {
+        return switch (self) {
+            .classic => "Classic",
+            .wood => "Wood",
+            .green => "Green",
+            .blue => "Blue",
+        };
+    }
+
+    pub fn fromString(s: []const u8) ThemeId {
+        return std.meta.stringToEnum(ThemeId, s) orelse .classic;
+    }
+
+    pub fn toString(self: ThemeId) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn next(self: ThemeId) ThemeId {
+        const n = @typeInfo(ThemeId).@"enum".fields.len;
+        return @enumFromInt((@as(usize, @intFromEnum(self)) + 1) % n);
+    }
+
+    pub fn prev(self: ThemeId) ThemeId {
+        const n = @typeInfo(ThemeId).@"enum".fields.len;
+        return @enumFromInt((@as(usize, @intFromEnum(self)) + n - 1) % n);
+    }
+};
+
+fn rgb(v: [3]u8) Color {
+    return .{ .rgb = v };
+}
+
+// The five mark colors (cursor, legal, check, endangered, hint-best) are shared
+// across themes: saturated and distinct from every (muted) square palette, so R10
+// holds for every preset. Only the board/chrome colors vary per theme.
+fn paletteOf(bg: [3]u8, dark: [3]u8, light: [3]u8, wp: [3]u8, bp: [3]u8, tp: [3]u8, td: [3]u8, sel: [3]u8) Palette {
+    return .{
+        .bg = rgb(bg),
+        .dark_square = rgb(dark),
+        .light_square = rgb(light),
+        .white_piece = rgb(wp),
+        .black_piece = rgb(bp),
+        .text_primary = rgb(tp),
+        .text_dim = rgb(td),
+        .highlight_cursor = rgb(.{ 255, 0, 255 }),
+        .highlight_selected = rgb(.{ 180, 0, 255 }),
+        .highlight_legal = rgb(.{ 0, 200, 255 }),
+        .highlight_check = rgb(.{ 255, 50, 50 }),
+        .highlight_flash = rgb(.{ 255, 0, 0 }),
+        .highlight_promotion = rgb(.{ 255, 200, 0 }),
+        .highlight_engine_move = rgb(.{ 0, 220, 180 }),
+        .highlight_endangered = rgb(.{ 255, 100, 50 }),
+        .highlight_hint_best = rgb(.{ 50, 200, 100 }),
+        .selection_bg = rgb(sel),
+    };
+}
+
+pub fn palette(id: ThemeId) Palette {
+    return switch (id) {
+        // Classic reproduces the original look exactly (R12).
+        .classic => paletteOf(.{ 15, 15, 35 }, .{ 55, 40, 100 }, .{ 105, 70, 150 }, .{ 200, 200, 220 }, .{ 20, 20, 40 }, .{ 192, 202, 245 }, .{ 100, 110, 150 }, .{ 40, 30, 70 }),
+        .wood => paletteOf(.{ 30, 22, 15 }, .{ 120, 80, 45 }, .{ 200, 165, 120 }, .{ 245, 235, 215 }, .{ 40, 25, 15 }, .{ 235, 220, 195 }, .{ 150, 125, 100 }, .{ 70, 50, 30 }),
+        .green => paletteOf(.{ 12, 25, 15 }, .{ 40, 80, 50 }, .{ 120, 170, 120 }, .{ 230, 240, 225 }, .{ 18, 30, 20 }, .{ 200, 230, 200 }, .{ 110, 140, 110 }, .{ 30, 55, 35 }),
+        .blue => paletteOf(.{ 10, 18, 35 }, .{ 35, 60, 110 }, .{ 95, 130, 190 }, .{ 220, 230, 245 }, .{ 15, 22, 40 }, .{ 200, 215, 245 }, .{ 100, 120, 160 }, .{ 30, 45, 80 }),
+    };
+}
+
+pub var Theme: Palette = palette(.classic);
 
 // drawMarks is hand-fitted to exactly this cell geometry; the RenderOptions
 // defaults and the drawMarks guard both reference it so they cannot drift apart.
@@ -458,6 +534,12 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     } else if (game.resign_pending) {
         _ = writeStr(win, 1, y, "Resign? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         y += 1;
+    } else if (game.quit_pending) {
+        _ = writeStr(win, 1, y, "Quit game? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        y += 1;
+    } else if (game.leave_pending) {
+        _ = writeStr(win, 1, y, "Leave to menu? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        y += 1;
     } else if (game.game_phase == .ended) {
         if (game.result) |result| {
             _ = writeStr(win, 1, y, result, .{ .fg = Theme.highlight_check, .bg = Theme.bg });
@@ -547,7 +629,7 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     // Keybind hints at bottom
     const hint_y = win.height -| 2;
     if (hint_y > y) {
-        _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select  U Undo", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         var hint_col = writeStr(win, 1, hint_y + 1, "R Resign N Menu F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         hint_col = writeStr(win, hint_col + 1, hint_y + 1, "H Hints", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         const hint_status: []const u8 = if (game.hints_enabled) " On" else " Off";
@@ -768,4 +850,32 @@ test "drawMarks: marks stay inside the cell rect (containment)" {
             }
         }
     }
+}
+
+test "palette: classic reproduces the original RGBs (R12)" {
+    const p = palette(.classic);
+    try testing.expectEqual(Color{ .rgb = .{ 15, 15, 35 } }, p.bg);
+    try testing.expectEqual(Color{ .rgb = .{ 55, 40, 100 } }, p.dark_square);
+    try testing.expectEqual(Color{ .rgb = .{ 105, 70, 150 } }, p.light_square);
+}
+
+test "palette: marks pairwise-distinct and distinct from squares for every theme (R10)" {
+    for ([_]ThemeId{ .classic, .wood, .green, .blue }) |id| {
+        const p = palette(id);
+        const marks = [_]Color{ p.highlight_cursor, p.highlight_legal, p.highlight_check, p.highlight_endangered, p.highlight_hint_best };
+        for (marks, 0..) |a, i| {
+            for (marks[i + 1 ..]) |b| {
+                try testing.expect(!std.meta.eql(a, b));
+            }
+            try testing.expect(!std.meta.eql(a, p.dark_square));
+            try testing.expect(!std.meta.eql(a, p.light_square));
+        }
+    }
+}
+
+test "ThemeId fromString/toString round-trip; unknown -> classic (AE10)" {
+    for ([_]ThemeId{ .classic, .wood, .green, .blue }) |id| {
+        try testing.expectEqual(id, ThemeId.fromString(id.toString()));
+    }
+    try testing.expectEqual(ThemeId.classic, ThemeId.fromString("nonsense"));
 }
