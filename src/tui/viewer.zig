@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const chess = @import("../chess.zig");
 const renderer = @import("renderer.zig");
 const pgn = @import("../persistence/pgn.zig");
+const analysis_mod = @import("../analysis.zig");
 
 const Theme = &renderer.Theme;
 const Window = vaxis.Window;
@@ -12,11 +13,22 @@ pub const ViewerAction = enum {
     back,
 };
 
+/// What the viewer panel conveys about analysis availability (U5/U6).
+pub const AnalysisDisplay = enum {
+    analyzing, // a backfill pass is in flight
+    ready, // analysis available — overlays shown
+    unavailable, // no engine / pass failed — plain step-through stays usable (R7)
+};
+
 pub const ViewerState = struct {
     boards: [*]const chess.Board,
     san_list: [*]const pgn.SanNotation,
     position: usize,
     total: usize,
+    /// Loaded or freshly computed analysis for overlays (U6); null until ready.
+    analysis: ?*const analysis_mod.GameAnalysis = null,
+    /// What the panel shows about analysis availability (U5/U6).
+    analysis_state: AnalysisDisplay = .unavailable,
 
     pub fn init(boards: [*]const chess.Board, san_list: [*]const pgn.SanNotation, move_count: usize) ViewerState {
         return .{

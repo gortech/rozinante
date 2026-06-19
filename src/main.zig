@@ -511,6 +511,7 @@ fn runGameHistory(
     history_games: *std.ArrayList(storage.GameInfo),
     data_dir: []const u8,
     selected_filepath: *?[]const u8,
+    stockfish_path: ?[]const u8,
 ) HistoryResult {
     var screen = HistoryScreen.init(history_games.*);
 
@@ -528,7 +529,7 @@ fn runGameHistory(
                     .select_finished => {
                         if (screen.selectedGame()) |g| {
                             selected_filepath.* = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch null;
-                            const viewer_result = runGameViewer(io, alloc, loop_ptr, vx, tty, selected_filepath.*);
+                            const viewer_result = runGameViewer(io, alloc, loop_ptr, vx, tty, selected_filepath.*, stockfish_path);
                             if (viewer_result == .back_to_menu) return .back;
                         }
                     },
@@ -562,6 +563,42 @@ const ViewerResult = enum {
     back_to_menu,
 };
 
+/// Which color the human played, from the PGN tags (`autoSave` writes "Player" to one
+/// side). Defaults to White for a foreign game where neither side is tagged "Player".
+fn viewerPlayerColor(parsed: *const pgn.ParsedGame) chess.Color {
+    if (parsed.white) |w| if (std.mem.eql(u8, w, "Player")) return .white;
+    if (parsed.black) |b| if (std.mem.eql(u8, b, "Player")) return .black;
+    return .white;
+}
+
+/// Cache a freshly backfilled analysis into the opened file, preserving its tags (U3).
+fn writeBackViewerAnalysis(
+    io: Io,
+    path: []const u8,
+    parsed: *const pgn.ParsedGame,
+    records: []const game_mod.MoveRecord,
+    board_history: []const chess.Board,
+    ga: *const analysis_mod.GameAnalysis,
+) void {
+    const header = pgn.PgnHeader{
+        .event = parsed.event orelse "Rozinante",
+        .site = parsed.site orelse "Local",
+        .date = parsed.date orelse "????.??.??",
+        .round = parsed.round orelse "-",
+        .white = parsed.white orelse "?",
+        .black = parsed.black orelse "?",
+        .result = parsed.result orelse "*",
+    };
+    var buf: [64 * 1024]u8 = undefined;
+    const content = pgn.writePgn(&buf, header, records, board_history, ga) catch {
+        log.warn("failed to serialize backfilled analysis", .{});
+        return;
+    };
+    storage.writeAnalyzedPgn(io, path, content) catch |err| {
+        log.warn("failed to write back backfilled analysis: {}", .{err});
+    };
+}
+
 fn runGameViewer(
     io: Io,
     alloc: std.mem.Allocator,
@@ -569,6 +606,7 @@ fn runGameViewer(
     vx: *vaxis.Vaxis,
     tty: *vaxis.Tty,
     filepath: ?[]const u8,
+    stockfish_path: ?[]const u8,
 ) ViewerResult {
     const fp = filepath orelse return .back_to_history;
     const pgn_content = storage.loadGame(alloc, io, fp) catch return .back_to_history;
@@ -579,14 +617,61 @@ fn runGameViewer(
     var boards: [513]chess.Board = undefined;
     boards[0] = chess.Board.initial;
     var san_list: [512]pgn.SanNotation = undefined;
+    var records: [512]game_mod.MoveRecord = undefined;
     for (0..move_count) |i| {
         const pm = parsed.moves[i];
-        const record = game_mod.MoveRecord{ .move = pm.move, .piece = pm.piece, .captured = pm.captured };
+        records[i] = .{ .move = pm.move, .piece = pm.piece, .captured = pm.captured };
         boards[i + 1] = chess.makeMove(boards[i], pm.move);
-        san_list[i] = pgn.computeSan(record, &boards[i], &boards[i + 1]);
+        san_list[i] = pgn.computeSan(records[i], &boards[i], &boards[i + 1]);
     }
 
     var viewer = ViewerState.init(&boards, &san_list, move_count);
+
+    // --- Analysis: cached if present, else backfill via a provisioned engine (U5) ---
+    var pass_future: ?Io.Future(void) = null;
+    var pass_cancel = std.atomic.Value(bool).init(false);
+    var pass_active: bool = false;
+    var pass_failed: bool = false;
+    var review_engine: ?engine_mod.Engine = null;
+    var analysis_storage: analysis_mod.GameAnalysis = undefined;
+    defer {
+        // Cancel-and-await the backfill before this frame's boards/analysis_storage pop
+        // (the worker reads them), then release the engine. Covers EVERY return below,
+        // including the `catch return` exits. Resize does not return, so it never cancels.
+        cancelAnalysisPass(io, &pass_future, &pass_cancel, &pass_active);
+        if (review_engine) |*e| e.deinit();
+    }
+
+    if (pgn.assembleAnalysis(&parsed, boards[0..move_count])) |cached| {
+        analysis_storage = cached;
+        viewer.analysis = &analysis_storage;
+        viewer.analysis_state = .ready;
+    } else if (stockfish_path) |sp| {
+        review_engine = engine_mod.Engine.init(io, sp, 20) catch null;
+        if (review_engine) |*e| {
+            e.relocate();
+            pass_active = true;
+            viewer.analysis_state = .analyzing;
+            pass_future = io.concurrent(analysisPassWork, .{
+                e,
+                boards[0..move_count],
+                &boards[move_count],
+                viewerPlayerColor(&parsed),
+                &analysis_storage,
+                &pass_cancel,
+                &pass_failed,
+                loop_ptr,
+            }) catch blk: {
+                pass_active = false;
+                viewer.analysis_state = .unavailable;
+                break :blk null;
+            };
+        } else {
+            viewer.analysis_state = .unavailable; // Stockfish present but failed to start (R7)
+        }
+    } else {
+        viewer.analysis_state = .unavailable; // no Stockfish (R7)
+    }
 
     while (true) {
         const win = vx.window();
@@ -600,6 +685,22 @@ fn runGameViewer(
                 switch (action) {
                     .back => return .back_to_history,
                     .none => {},
+                }
+            },
+            .analysis_pass_ready => {
+                if (pass_future) |*f| {
+                    f.await(io);
+                    pass_future = null;
+                }
+                pass_active = false;
+                if (!pass_failed) {
+                    viewer.analysis = &analysis_storage;
+                    viewer.analysis_state = .ready;
+                    if (filepath) |path| {
+                        writeBackViewerAnalysis(io, path, &parsed, records[0..move_count], boards[0 .. move_count + 1], &analysis_storage);
+                    }
+                } else {
+                    viewer.analysis_state = .unavailable;
                 }
             },
             .winsize => |ws| {
@@ -761,7 +862,7 @@ pub fn main(init: std.process.Init) !void {
                             else |_|
                                 std.ArrayList(storage.GameInfo).empty;
                             var selected_fp: ?[]const u8 = null;
-                            const hist_result = runGameHistory(io, alloc, &loop, &vx, &tty, &history_list, dd, &selected_fp);
+                            const hist_result = runGameHistory(io, alloc, &loop, &vx, &tty, &history_list, dd, &selected_fp, stockfish_path);
                             if (hist_result == .resume_game) {
                                 if (selected_fp) |fp| {
                                     // Parse the selected game to extract elo and color for resume
