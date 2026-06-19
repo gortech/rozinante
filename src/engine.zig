@@ -1,5 +1,6 @@
 const std = @import("std");
 const chess = @import("chess.zig");
+const analysis = @import("analysis.zig");
 const Io = std.Io;
 const File = Io.File;
 const process = std.process;
@@ -15,8 +16,10 @@ pub const EngineError = error{
     EngineDead,
 };
 
+pub const Eval = analysis.Eval;
+
 pub const Analysis = struct {
-    eval_cp: i32,
+    eval: Eval,
     best_move: ?Move,
     principal_variation: []const u8,
     depth: u16,
@@ -172,7 +175,7 @@ pub const Engine = struct {
         try self.sendCommand(go_cmd);
 
         var result = Analysis{
-            .eval_cp = 0,
+            .eval = .{ .cp = 0 },
             .best_move = null,
             .principal_variation = "",
             .depth = 0,
@@ -266,7 +269,11 @@ pub fn parseInfoLine(line: []const u8, result: *Analysis) void {
             }
         } else if (std.mem.eql(u8, token, "cp")) {
             if (iter.next()) |val| {
-                result.eval_cp = std.fmt.parseInt(i32, val, 10) catch continue;
+                result.eval = .{ .cp = std.fmt.parseInt(i32, val, 10) catch continue };
+            }
+        } else if (std.mem.eql(u8, token, "mate")) {
+            if (iter.next()) |val| {
+                result.eval = .{ .mate = std.fmt.parseInt(i32, val, 10) catch continue };
             }
         } else if (std.mem.eql(u8, token, "pv")) {
             if (iter.rest().len > 0) {
@@ -414,28 +421,42 @@ test "parseBestMove: castling notation" {
 }
 
 test "parseInfoLine: depth and score" {
-    var result = Analysis{ .eval_cp = 0, .best_move = null, .principal_variation = "", .depth = 0 };
+    var result = Analysis{ .eval = .{ .cp = 0 }, .best_move = null, .principal_variation = "", .depth = 0 };
     parseInfoLine("info depth 12 seldepth 15 score cp 35 nodes 12345 pv e2e4 e7e5", &result);
     try std.testing.expectEqual(@as(u16, 12), result.depth);
-    try std.testing.expectEqual(@as(i32, 35), result.eval_cp);
+    try std.testing.expectEqual(Eval{ .cp = 35 }, result.eval);
     try std.testing.expectEqualStrings("e2e4 e7e5", result.principal_variation);
 }
 
 test "parseInfoLine: negative score" {
-    var result = Analysis{ .eval_cp = 0, .best_move = null, .principal_variation = "", .depth = 0 };
+    var result = Analysis{ .eval = .{ .cp = 0 }, .best_move = null, .principal_variation = "", .depth = 0 };
     parseInfoLine("info depth 8 score cp -150 pv d7d5", &result);
-    try std.testing.expectEqual(@as(i32, -150), result.eval_cp);
+    try std.testing.expectEqual(Eval{ .cp = -150 }, result.eval);
+}
+
+test "parseInfoLine: forced mate parses as mate, not 0.00" {
+    var result = Analysis{ .eval = .{ .cp = 0 }, .best_move = null, .principal_variation = "", .depth = 0 };
+    parseInfoLine("info depth 20 score mate 3 pv h5f7", &result);
+    try std.testing.expectEqual(Eval{ .mate = 3 }, result.eval);
+    try std.testing.expect(result.eval.toCp() > 1000);
+}
+
+test "parseInfoLine: getting mated parses as negative mate" {
+    var result = Analysis{ .eval = .{ .cp = 0 }, .best_move = null, .principal_variation = "", .depth = 0 };
+    parseInfoLine("info depth 18 score mate -2 pv g1h1", &result);
+    try std.testing.expectEqual(Eval{ .mate = -2 }, result.eval);
+    try std.testing.expect(result.eval.toCp() < -1000);
 }
 
 test "parseInfoLine: info without score" {
-    var result = Analysis{ .eval_cp = 0, .best_move = null, .principal_variation = "", .depth = 0 };
+    var result = Analysis{ .eval = .{ .cp = 0 }, .best_move = null, .principal_variation = "", .depth = 0 };
     parseInfoLine("info depth 5 seldepth 5 nodes 100", &result);
     try std.testing.expectEqual(@as(u16, 5), result.depth);
-    try std.testing.expectEqual(@as(i32, 0), result.eval_cp);
+    try std.testing.expectEqual(Eval{ .cp = 0 }, result.eval);
 }
 
 test "parseInfoLine: empty info" {
-    var result = Analysis{ .eval_cp = 0, .best_move = null, .principal_variation = "", .depth = 0 };
+    var result = Analysis{ .eval = .{ .cp = 0 }, .best_move = null, .principal_variation = "", .depth = 0 };
     parseInfoLine("info string ", &result);
     try std.testing.expectEqual(@as(u16, 0), result.depth);
 }
