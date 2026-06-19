@@ -791,6 +791,10 @@ pub fn main(init: std.process.Init) !void {
     var pass_cancel = std.atomic.Value(bool).init(false);
     var pass_failed: bool = false;
     var pass_active: bool = false;
+    // Cancel-await any in-flight post-game pass before main() unwinds (LIFO: runs
+    // before the current_engine deinit defer), so a terminal-IO error return can't
+    // orphan the worker reading a killed engine / freed game_state.
+    defer cancelAnalysisPass(io, &pass_future, &pass_cancel, &pass_active);
 
     const opening_book = try alloc.create(openings.OpeningBook);
     opening_book.* = openings.OpeningBook.init();

@@ -163,8 +163,10 @@ pub fn listGames(allocator: Allocator, io: Io, data_dir: []const u8) ![]GameInfo
 
         const info = parseFilename(allocator, name) orelse continue;
 
-        // One bounded read per file yields both the result tag and the analysis header.
-        const content: ?[]const u8 = dir.readFileAlloc(io, name, allocator, .limited(8192)) catch null;
+        // One read per file yields both the result tag and the analysis header. The
+        // limit matches loadGame (1 MB): readFileAlloc errors at the limit rather than
+        // truncating, and annotation inflates long games past a smaller bound.
+        const content: ?[]const u8 = dir.readFileAlloc(io, name, allocator, .limited(1024 * 1024)) catch null;
         defer if (content) |c| allocator.free(c);
         const result_tag = if (content) |c| extractResultTag(allocator, c) else (allocator.dupe(u8, "*") catch "*");
         const is_finished = !std.mem.eql(u8, result_tag, "*");
@@ -413,4 +415,38 @@ test "writeAnalyzedPgn overwrites the opened file in place (no duplicate)" {
         if (e.kind == .file) count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "listGames reads annotated games larger than the old 8KB limit (regression)" {
+    const io = getTestIo();
+    const allocator = std.testing.allocator;
+    const tmp_dir = "/tmp/rozinante-test-biglist";
+    Dir.cwd().createDirPath(io, tmp_dir) catch {};
+    defer cleanupTestDir(io, tmp_dir);
+
+    // A finished, analyzed game whose text exceeds 8192 bytes — annotation inflates long
+    // games past the old read limit, which errored (not truncated), losing the tags.
+    var buf: [12000]u8 = undefined;
+    const head = "[Event \"T\"]\n[Result \"1-0\"]\n[RozAnalysis \"v1 plies=2 bad=1 meh=0 acc=80.0\"]\n\n1. e4 e5 1-0\n";
+    @memcpy(buf[0..head.len], head);
+    @memset(buf[head.len..], 'X');
+    const content = buf[0 .. head.len + 9000];
+
+    const path = try saveGame(allocator, io, tmp_dir, .{ .pgn_content = content, .date_secs = 1783529422, .elo = 1200, .color = "white" });
+    defer allocator.free(path);
+
+    const games = try listGames(allocator, io, tmp_dir);
+    defer {
+        for (games) |g| {
+            allocator.free(g.filename);
+            allocator.free(g.date);
+            allocator.free(g.player_color);
+            allocator.free(g.result);
+        }
+        allocator.free(games);
+    }
+    try std.testing.expectEqual(@as(usize, 1), games.len);
+    try std.testing.expect(games[0].is_finished);
+    try std.testing.expectEqual(@as(?u16, 1), games[0].blunders);
+    try std.testing.expect(games[0].accuracy != null);
 }
