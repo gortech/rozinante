@@ -107,12 +107,7 @@ pub fn main(init: std.process.Init) !void {
             .key_press => |key| {
                 if (key.codepoint == 'q') break;
                 if (key.codepoint == 't') {
-                    preview_theme = switch (preview_theme) {
-                        .classic => .wood,
-                        .wood => .green,
-                        .green => .blue,
-                        .blue => .classic,
-                    };
+                    preview_theme = preview_theme.next();
                     renderer.Theme = renderer.palette(preview_theme);
                 }
             },

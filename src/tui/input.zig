@@ -12,38 +12,34 @@ pub const Action = enum {
     undo,
 };
 
+/// Resolve a Y/N modal keypress: true = confirm (y/enter), false = cancel
+/// (n/esc), null = neither (leave the prompt open).
+pub fn confirmKey(key: vaxis.Key) ?bool {
+    if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) return true;
+    if (key.matches('n', .{}) or key.matches(vaxis.Key.escape, .{})) return false;
+    return null;
+}
+
 pub fn handleKeyPress(game: *Game, key: vaxis.Key) Action {
     // Modal confirmations take precedence: resolve the open prompt before anything else.
     if (game.resign_pending) {
-        if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
+        if (confirmKey(key)) |yes| {
             game.resign_pending = false;
-            return .resign;
-        }
-        if (key.matches('n', .{}) or key.matches(vaxis.Key.escape, .{})) {
-            game.resign_pending = false;
-            return .render;
+            return if (yes) .resign else .render;
         }
         return .none;
     }
     if (game.quit_pending) {
-        if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
+        if (confirmKey(key)) |yes| {
             game.quit_pending = false;
-            return .quit;
-        }
-        if (key.matches('n', .{}) or key.matches(vaxis.Key.escape, .{})) {
-            game.quit_pending = false;
-            return .render;
+            return if (yes) .quit else .render;
         }
         return .none;
     }
     if (game.leave_pending) {
-        if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
+        if (confirmKey(key)) |yes| {
             game.leave_pending = false;
-            return .new_game;
-        }
-        if (key.matches('n', .{}) or key.matches(vaxis.Key.escape, .{})) {
-            game.leave_pending = false;
-            return .render;
+            return if (yes) .new_game else .render;
         }
         return .none;
     }

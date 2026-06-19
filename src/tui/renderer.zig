@@ -44,19 +44,21 @@ pub const ThemeId = enum {
     }
 
     pub fn fromString(s: []const u8) ThemeId {
-        if (std.mem.eql(u8, s, "wood")) return .wood;
-        if (std.mem.eql(u8, s, "green")) return .green;
-        if (std.mem.eql(u8, s, "blue")) return .blue;
-        return .classic;
+        return std.meta.stringToEnum(ThemeId, s) orelse .classic;
     }
 
     pub fn toString(self: ThemeId) []const u8 {
-        return switch (self) {
-            .classic => "classic",
-            .wood => "wood",
-            .green => "green",
-            .blue => "blue",
-        };
+        return @tagName(self);
+    }
+
+    pub fn next(self: ThemeId) ThemeId {
+        const n = @typeInfo(ThemeId).@"enum".fields.len;
+        return @enumFromInt((@as(usize, @intFromEnum(self)) + 1) % n);
+    }
+
+    pub fn prev(self: ThemeId) ThemeId {
+        const n = @typeInfo(ThemeId).@"enum".fields.len;
+        return @enumFromInt((@as(usize, @intFromEnum(self)) + n - 1) % n);
     }
 };
 

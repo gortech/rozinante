@@ -112,12 +112,7 @@ pub const Menu = struct {
                     };
                 },
                 .theme => {
-                    self.selected_theme = switch (self.selected_theme) {
-                        .classic => .blue,
-                        .wood => .classic,
-                        .green => .wood,
-                        .blue => .green,
-                    };
+                    self.selected_theme = self.selected_theme.prev();
                     renderer.Theme = renderer.palette(self.selected_theme);
                 },
                 .resume_game, .game_history, .start => {},
@@ -139,12 +134,7 @@ pub const Menu = struct {
                     };
                 },
                 .theme => {
-                    self.selected_theme = switch (self.selected_theme) {
-                        .classic => .wood,
-                        .wood => .green,
-                        .green => .blue,
-                        .blue => .classic,
-                    };
+                    self.selected_theme = self.selected_theme.next();
                     renderer.Theme = renderer.palette(self.selected_theme);
                 },
                 .resume_game, .game_history, .start => {},

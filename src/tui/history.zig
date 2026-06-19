@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const renderer = @import("renderer.zig");
 const storage = @import("../persistence/storage.zig");
+const input = @import("input.zig");
 
 const Theme = &renderer.Theme;
 const Window = vaxis.Window;
@@ -33,13 +34,9 @@ pub const HistoryScreen = struct {
         const total = self.games.items.len;
 
         if (self.delete_pending) {
-            if (key.matches('y', .{}) or key.matches(vaxis.Key.enter, .{})) {
+            if (input.confirmKey(key)) |yes| {
                 self.delete_pending = false;
-                return .delete;
-            }
-            if (key.matches('n', .{}) or key.matches(vaxis.Key.escape, .{})) {
-                self.delete_pending = false;
-                return .none;
+                if (yes) return .delete;
             }
             return .none;
         }
