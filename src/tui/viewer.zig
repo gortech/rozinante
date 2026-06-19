@@ -325,7 +325,8 @@ fn formatPovEval(buf: []u8, e: analysis_mod.Eval, flip: bool) []const u8 {
         .cp => |c| {
             const v: i32 = if (flip) -c else c;
             const pawns = @as(f32, @floatFromInt(v)) / 100.0;
-            return std.fmt.bufPrint(buf, "{d:+.1}", .{pawns}) catch "";
+            const sign: []const u8 = if (pawns >= 0) "+" else ""; // negatives already carry '-'
+            return std.fmt.bufPrint(buf, "{s}{d:.1}", .{ sign, pawns }) catch "";
         },
     }
 }
@@ -406,4 +407,13 @@ test "jumpToWorstMove lands on the first player mistake by swing rank" {
     v.jumpToWorstMove();
     try std.testing.expectEqual(@as(?usize, 2), v.key_moment_idx);
     try std.testing.expectEqual(@as(usize, 4), v.position); // ply 3 + 1
+}
+
+test "formatPovEval: player-perspective sign and mate notation" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("+1.2", formatPovEval(&buf, .{ .cp = 120 }, false));
+    try std.testing.expectEqualStrings("-0.5", formatPovEval(&buf, .{ .cp = 50 }, true)); // flip: 50 -> -50
+    try std.testing.expectEqualStrings("+0.0", formatPovEval(&buf, .{ .cp = 0 }, false));
+    try std.testing.expectEqualStrings("#3", formatPovEval(&buf, .{ .mate = 3 }, false));
+    try std.testing.expectEqualStrings("#-2", formatPovEval(&buf, .{ .mate = 2 }, true)); // flip mate
 }
