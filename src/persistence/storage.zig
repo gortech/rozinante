@@ -3,6 +3,7 @@ const Io = std.Io;
 const Dir = std.Io.Dir;
 const Allocator = std.mem.Allocator;
 const known_folders = @import("known_folders");
+const pgn = @import("pgn.zig");
 
 const log = std.log.scoped(.persistence);
 
@@ -15,6 +16,10 @@ pub const GameInfo = struct {
     player_color: []const u8,
     result: []const u8,
     is_finished: bool,
+    /// Analysis summary from the [RozAnalysis] tag; null when the game is unanalyzed (U8).
+    blunders: ?u16 = null,
+    inaccuracies: ?u16 = null,
+    accuracy: ?f32 = null,
 };
 
 pub const SaveGameData = struct {
@@ -158,8 +163,12 @@ pub fn listGames(allocator: Allocator, io: Io, data_dir: []const u8) ![]GameInfo
 
         const info = parseFilename(allocator, name) orelse continue;
 
-        const result_tag = readResultTag(allocator, io, dir, name) catch "*";
+        // One bounded read per file yields both the result tag and the analysis header.
+        const content: ?[]const u8 = dir.readFileAlloc(io, name, allocator, .limited(8192)) catch null;
+        defer if (content) |c| allocator.free(c);
+        const result_tag = if (content) |c| extractResultTag(allocator, c) else (allocator.dupe(u8, "*") catch "*");
         const is_finished = !std.mem.eql(u8, result_tag, "*");
+        const hdr: ?pgn.RozHeader = if (content) |c| pgn.readAnalysisHeader(c) else null;
 
         games.append(allocator, .{
             .filename = info.filename,
@@ -168,6 +177,9 @@ pub fn listGames(allocator: Allocator, io: Io, data_dir: []const u8) ![]GameInfo
             .player_color = info.player_color,
             .result = result_tag,
             .is_finished = is_finished,
+            .blunders = if (hdr) |h| h.blunders else null,
+            .inaccuracies = if (hdr) |h| h.inaccuracies else null,
+            .accuracy = if (hdr) |h| h.accuracy else null,
         }) catch |err| {
             log.err("failed to collect game info: {}", .{err});
             return err;
@@ -235,13 +247,9 @@ fn parseFilename(allocator: Allocator, name: []const u8) ?ParsedFilename {
     };
 }
 
-fn readResultTag(allocator: Allocator, io: Io, dir: Dir, filename: []const u8) ![]const u8 {
-    const content = dir.readFileAlloc(io, filename, allocator, .limited(8192)) catch {
-        return "*";
-    };
-    defer allocator.free(content);
-
-    // Look for [Result "..."] tag
+/// Extract the [Result "..."] tag value from already-read PGN content (dup'd; "*" if
+/// absent). Split from the file read so `listGames` reads each file only once.
+fn extractResultTag(allocator: Allocator, content: []const u8) []const u8 {
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
