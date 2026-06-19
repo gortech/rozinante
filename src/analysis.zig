@@ -209,6 +209,37 @@ pub fn computeKeyMoments(moves: []const MoveAnalysis, out: *[max_key_moments]u16
     return k;
 }
 
+/// Assemble per-ply analysis from gathered engine evals (the pure core of the U4 pass —
+/// no engine, so it is unit-testable). `boards[i]` is the position before ply i;
+/// `best_evals[i]`/`bests[i]` are the engine's eval + best move there; `final_eval` is
+/// the eval of the position after the last ply (synthesized for a terminal board). A
+/// ply's after-eval is the next position's eval, or `final_eval` for the last ply. The
+/// tier is kept only on plies the player moved (`boards[i].active_color == player_color`).
+pub fn buildFromEvals(
+    out: *GameAnalysis,
+    boards: []const chess.Board,
+    best_evals: []const Eval,
+    bests: []const ?chess.Move,
+    final_eval: Eval,
+    player_color: chess.Color,
+) void {
+    out.* = .{};
+    const n = boards.len;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const after = if (i + 1 < n) best_evals[i + 1] else final_eval;
+        const rated = rateMove(best_evals[i], after);
+        out.append(.{
+            .eval = after,
+            .best = bests[i],
+            .best_eval = best_evals[i],
+            .cpl = rated.cpl,
+            .tier = if (boards[i].active_color == player_color) rated.tier else null,
+        });
+    }
+    out.finalize();
+}
+
 test "toCp: cp passes through" {
     try std.testing.expectEqual(@as(i32, 35), (Eval{ .cp = 35 }).toCp());
     try std.testing.expectEqual(@as(i32, -150), (Eval{ .cp = -150 }).toCp());
@@ -347,4 +378,42 @@ test "GameAnalysis.finalize: fills aggregates, key moments, marker" {
     try std.testing.expectEqual(current_version, ga.version);
     try std.testing.expectEqual(@as(u8, 2), ga.key_moment_count);
     try std.testing.expectEqual(@as(u16, 1), ga.key_moments[0]); // the blunder swings most
+}
+
+test "buildFromEvals: after-eval shifts, last ply uses final, engine plies untiered" {
+    // White is the player. Plies: 0 white (player), 1 black (engine), 2 white (player).
+    var boards: [3]chess.Board = undefined;
+    boards[0] = chess.Board.initial;
+    boards[1] = chess.makeMove(boards[0], chess.Move.fromUci("e2e4").?);
+    boards[2] = chess.makeMove(boards[1], chess.Move.fromUci("e7e5").?);
+    const best_evals = [_]Eval{ .{ .cp = 20 }, .{ .cp = -10 }, .{ .cp = 30 } };
+    const bests = [_]?chess.Move{ chess.Move.fromUci("e2e4"), chess.Move.fromUci("g8f6"), chess.Move.fromUci("d2d4") };
+    const final_eval = Eval{ .cp = -25 };
+
+    var ga = GameAnalysis{};
+    buildFromEvals(&ga, &boards, &best_evals, &bests, final_eval, .white);
+
+    try std.testing.expectEqual(@as(u16, 3), ga.count);
+    // ply 0 after-eval = best_evals[1]; last ply after-eval = final_eval.
+    try std.testing.expectEqual(Eval{ .cp = -10 }, ga.moves[0].eval);
+    try std.testing.expectEqual(Eval{ .cp = -25 }, ga.moves[2].eval);
+    // best_eval is the position-before eval, untouched by the shift.
+    try std.testing.expectEqual(Eval{ .cp = 30 }, ga.moves[2].best_eval);
+    // ply 1 is the engine's move (black to move there) → no tier.
+    try std.testing.expectEqual(@as(?Tier, null), ga.moves[1].tier);
+    try std.testing.expect(ga.moves[0].tier != null); // player plies are tiered
+    try std.testing.expect(ga.moves[2].tier != null);
+}
+
+test "buildFromEvals: Black player tiers only Black plies" {
+    var boards: [2]chess.Board = undefined;
+    boards[0] = chess.Board.initial; // white to move (ply 0 = engine when player is black)
+    boards[1] = chess.makeMove(boards[0], chess.Move.fromUci("e2e4").?); // black to move (ply 1 = player)
+    const best_evals = [_]Eval{ .{ .cp = 15 }, .{ .cp = -15 } };
+    const bests = [_]?chess.Move{ chess.Move.fromUci("d2d4"), chess.Move.fromUci("e7e5") };
+
+    var ga = GameAnalysis{};
+    buildFromEvals(&ga, &boards, &best_evals, &bests, .{ .cp = 10 }, .black);
+    try std.testing.expectEqual(@as(?Tier, null), ga.moves[0].tier); // white ply = engine
+    try std.testing.expect(ga.moves[1].tier != null); // black ply = player
 }

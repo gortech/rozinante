@@ -1,5 +1,6 @@
 const chess = @import("../chess.zig");
 const openings = @import("../openings.zig");
+const analysis = @import("../analysis.zig");
 
 pub const Opponent = enum {
     human,
@@ -28,6 +29,11 @@ pub const GamePhase = enum {
     playing,
     ended,
 };
+
+/// State of this game's post-game analysis pass (U4): none = not started;
+/// pending = the background pass is running; ready = analysis available (overlays);
+/// failed = the pass could not complete (engine died or absent).
+pub const AnalysisState = enum { none, pending, ready, failed };
 
 pub const PromotionPending = struct {
     from: chess.Square,
@@ -199,6 +205,9 @@ pub const Game = struct {
     hints_enabled: bool,
     hint_endangered: [64]bool,
     hint_best_move: ?LastMove,
+    /// Post-game analysis result (U4/U7); valid once `analysis_state == .ready`.
+    analysis: analysis.GameAnalysis,
+    analysis_state: AnalysisState,
 
     pub fn init() Game {
         return initWithColorAndBook(.white, null);
@@ -239,6 +248,8 @@ pub const Game = struct {
             .hints_enabled = false,
             .hint_endangered = [_]bool{false} ** 64,
             .hint_best_move = null,
+            .analysis = .{},
+            .analysis_state = .none,
         };
     }
 
