@@ -576,9 +576,9 @@ fn renderSummaryCard(win: Window, game: *const Game, y_in: u16) void {
     // Accuracy is secondary; "\u{2014}" (em dash) when the player made no rated move.
     col = writeStr(win, 1, y, "Accuracy ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
     if (ga.accuracy) |acc| {
-        var abuf: [8]u8 = undefined;
-        const s = std.fmt.bufPrint(&abuf, "{d:.0}%", .{acc}) catch "?";
-        _ = writeStr(win, col, y, s, .{ .fg = Theme.text_primary, .bg = Theme.bg });
+        const pct: u16 = @intFromFloat(@round(std.math.clamp(acc, 0, 100)));
+        col = writeNum(win, col, y, pct, .{ .fg = Theme.text_primary, .bg = Theme.bg });
+        _ = writeStr(win, col, y, "%", .{ .fg = Theme.text_primary, .bg = Theme.bg });
     } else {
         _ = writeStr(win, col, y, "\u{2014}", .{ .fg = Theme.text_dim, .bg = Theme.bg });
     }
@@ -978,4 +978,65 @@ test "ThemeId fromString/toString round-trip; unknown -> classic (AE10)" {
         try testing.expectEqual(id, ThemeId.fromString(id.toString()));
     }
     try testing.expectEqual(ThemeId.classic, ThemeId.fromString("nonsense"));
+}
+
+// Renders the panel to an offline screen and flattens it to text. Catches the class of
+// bug where writeStr stores a slice into a caller buffer that dies before vx.render
+// flushes (cells hold slices into `text`, not copies) — only static/long-lived strings
+// survive, so a value formatted into a render-local buffer renders blank.
+fn renderPanelToText(buf: []u8, game: *const Game, w: u16) []const u8 {
+    var screen = vaxis.Screen.init(testing.allocator, .{ .rows = 40, .cols = w, .x_pixel = 0, .y_pixel = 0 }) catch return "";
+    defer screen.deinit(testing.allocator);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = w, .height = 40, .screen = &screen };
+    renderInfoPanel(win, game);
+    var n: usize = 0;
+    for (0..40) |r| {
+        for (0..w) |c| {
+            const cell = screen.readCell(@intCast(c), @intCast(r)) orelse continue;
+            const gph = cell.char.grapheme;
+            if (gph.len == 0) continue;
+            for (gph) |ch| if (n < buf.len) {
+                buf[n] = ch;
+                n += 1;
+            };
+        }
+        if (n < buf.len) {
+            buf[n] = '\n';
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+test "summary card paints the accuracy value (not a dangling slice)" {
+    var game = Game.init();
+    game.game_phase = .ended;
+    game.result = "0-1";
+    game.move_count = 28;
+    game.analysis_state = .ready;
+    game.analysis.count = 28;
+    game.analysis.blunders = 0;
+    game.analysis.inaccuracies = 0;
+    game.analysis.accuracy = 99.9;
+
+    var buf: [4096]u8 = undefined;
+    const text = renderPanelToText(&buf, &game, 30);
+    try testing.expect(std.mem.indexOf(u8, text, "Accuracy") != null);
+    // 99.9 rounds to 100; the value must actually paint (the dangling-slice bug left it blank).
+    try testing.expect(std.mem.indexOf(u8, text, "100%") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Mistakes") != null);
+}
+
+test "summary card shows em dash when accuracy is null (no rated move)" {
+    var game = Game.init();
+    game.game_phase = .ended;
+    game.result = "1-0";
+    game.move_count = 0;
+    game.analysis_state = .ready;
+    game.analysis.accuracy = null;
+
+    var buf: [4096]u8 = undefined;
+    const text = renderPanelToText(&buf, &game, 30);
+    try testing.expect(std.mem.indexOf(u8, text, "Accuracy") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\u{2014}") != null);
 }

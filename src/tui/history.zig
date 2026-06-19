@@ -149,9 +149,9 @@ pub const HistoryScreen = struct {
                     _ = renderer.writeStr(win, x0 + 40, y, "\xe2\x80\x94", style);
                 }
                 if (g.accuracy) |a| {
-                    var acc_buf: [8]u8 = undefined;
-                    const s = std.fmt.bufPrint(&acc_buf, "{d:.0}%", .{a}) catch "?";
-                    _ = renderer.writeStr(win, x0 + 47, y, s, style);
+                    const pct: u16 = @intFromFloat(@round(std.math.clamp(a, 0, 100)));
+                    const c = renderer.writeNum(win, x0 + 47, y, pct, style);
+                    _ = renderer.writeStr(win, c, y, "%", style);
                 } else {
                     _ = renderer.writeStr(win, x0 + 47, y, "\xe2\x80\x94", style);
                 }

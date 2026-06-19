@@ -33,6 +33,12 @@ pub const ViewerState = struct {
     player_color: chess.Color = .white,
     /// Cursor into the swing-ranked key moments, null until the key is first pressed.
     key_moment_idx: ?usize = null,
+    /// Scratch storage for the current frame's formatted best-move SAN and eval. It
+    /// lives in ViewerState (the runGameViewer frame), so the slices `writeStr` stores
+    /// into cells stay valid until `vx.render` flushes — a render-local buffer would
+    /// dangle (cells hold slices into `text`, not copies).
+    scratch_san: pgn.SanNotation = undefined,
+    scratch_eval: [16]u8 = undefined,
 
     pub fn init(boards: [*]const chess.Board, san_list: [*]const pgn.SanNotation, move_count: usize) ViewerState {
         return .{
@@ -134,7 +140,7 @@ pub const ViewerState = struct {
         return &self.boards[self.position];
     }
 
-    pub fn render(self: *const ViewerState, win: Window) void {
+    pub fn render(self: *ViewerState, win: Window) void {
         win.clear();
         win.fill(.{ .style = .{ .bg = Theme.bg } });
 
@@ -166,7 +172,7 @@ pub const ViewerState = struct {
         self.renderInfoPanel(info_win);
     }
 
-    fn renderInfoPanel(self: *const ViewerState, win: Window) void {
+    fn renderInfoPanel(self: *ViewerState, win: Window) void {
         win.fill(.{ .style = .{ .bg = Theme.bg } });
         if (win.width < 8 or win.height < 8) return;
 
@@ -264,7 +270,7 @@ pub const ViewerState = struct {
 
     /// Analysis panel lines for the current position: best move + eval (R4), the tier
     /// of the move that led here (R5), and the key-moment cursor (R6). Returns new y.
-    fn renderAnalysisLines(self: *const ViewerState, win: Window, y0: u16, ga: *const analysis_mod.GameAnalysis) u16 {
+    fn renderAnalysisLines(self: *ViewerState, win: Window, y0: u16, ga: *const analysis_mod.GameAnalysis) u16 {
         var y = y0;
         const pos = self.position;
 
@@ -272,11 +278,10 @@ pub const ViewerState = struct {
             const ma = ga.moves[pos];
             if (ma.best) |bm| {
                 const flip = self.currentBoard().active_color != self.player_color;
-                var ebuf: [16]u8 = undefined;
-                const ev = formatPovEval(&ebuf, ma.best_eval, flip);
-                const san = pgn.sanForMove(self.currentBoard(), bm);
+                self.scratch_san = pgn.sanForMove(self.currentBoard(), bm);
+                const ev = formatPovEval(&self.scratch_eval, ma.best_eval, flip);
                 var col = renderer.writeStr(win, 1, y, "Best ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-                col = renderer.writeStr(win, col, y, san.slice(), .{ .fg = Theme.text_primary, .bg = Theme.bg });
+                col = renderer.writeStr(win, col, y, self.scratch_san.slice(), .{ .fg = Theme.text_primary, .bg = Theme.bg });
                 col += 1;
                 _ = renderer.writeStr(win, col, y, ev, .{ .fg = Theme.text_primary, .bg = Theme.bg });
                 y += 1;
@@ -416,4 +421,47 @@ test "formatPovEval: player-perspective sign and mate notation" {
     try std.testing.expectEqualStrings("+0.0", formatPovEval(&buf, .{ .cp = 0 }, false));
     try std.testing.expectEqualStrings("#3", formatPovEval(&buf, .{ .mate = 3 }, false));
     try std.testing.expectEqualStrings("#-2", formatPovEval(&buf, .{ .mate = 2 }, true)); // flip mate
+}
+
+test "viewer paints the best-move SAN + eval (not a dangling slice)" {
+    const alloc = std.testing.allocator;
+    var boards: [2]chess.Board = undefined;
+    boards[0] = chess.Board.initial;
+    const e4 = chess.Move.fromUci("e2e4").?;
+    boards[1] = chess.makeMove(boards[0], e4);
+    var sans: [1]pgn.SanNotation = undefined;
+    sans[0] = pgn.computeSan(.{ .move = e4, .piece = boards[0].pieceAt(chess.Square.init(.e, .@"2")), .captured = null }, &boards[0], &boards[1]);
+
+    var ga = analysis_mod.GameAnalysis{};
+    ga.count = 1;
+    ga.moves[0] = .{ .eval = .{ .cp = -30 }, .best = e4, .best_eval = .{ .cp = 30 }, .cpl = 0, .tier = .good };
+
+    var v = ViewerState.init(&boards, &sans, 1);
+    v.position = 0;
+    v.player_color = .white;
+    v.analysis = &ga;
+    v.analysis_state = .ready;
+
+    var screen = try vaxis.Screen.init(alloc, .{ .rows = 64, .cols = 130, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(alloc);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 130, .height = 64, .screen = &screen };
+    v.render(win);
+
+    var buf: [8192]u8 = undefined;
+    var n: usize = 0;
+    for (0..64) |r| {
+        for (0..130) |c| {
+            const cell = screen.readCell(@intCast(c), @intCast(r)) orelse continue;
+            const g = cell.char.grapheme;
+            if (g.len == 0) continue;
+            for (g) |ch| if (n < buf.len) {
+                buf[n] = ch;
+                n += 1;
+            };
+        }
+    }
+    const text = buf[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, text, "Best") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "e4") != null); // the best-move SAN must paint
+    try std.testing.expect(std.mem.indexOf(u8, text, "+0.3") != null); // and its eval
 }
