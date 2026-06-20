@@ -308,13 +308,12 @@ pub const ViewerState = struct {
 
         if (pos > 0 and pos - 1 < ga.count) {
             const ma = ga.moves[pos - 1];
-            if (ma.tier) |t| {
-                var col = renderer.writeStr(win, 1, y, "Move ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-                col = renderer.writeStr(win, col, y, renderer.tierGlyph(t), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
-                col += 1;
-                _ = renderer.writeStr(win, col, y, moveLabel(ma.cpl), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
-                y += 1;
-            }
+            const t = ma.tier orelse analysis_mod.tierFromCpl(ma.cpl);
+            var col = renderer.writeStr(win, 1, y, "Move ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            col = renderer.writeStr(win, col, y, renderer.tierGlyph(t), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
+            col += 1;
+            _ = renderer.writeStr(win, col, y, moveLabel(ma.cpl), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
+            y += 1;
         }
 
         if (ga.key_moment_count > 0) {
@@ -335,12 +334,12 @@ pub const ViewerState = struct {
     }
 };
 
-/// Draw a 1-char tier glyph after a move's SAN (player plies only), if the panel has
-/// room. Returns the column after the glyph (or `col` unchanged when skipped).
+/// Draw a 1-char tier glyph after a move's SAN for either side — engine plies
+/// derive the tier from the always-present cpl (R16) — if the panel has room.
 fn drawTierGlyph(win: Window, col: u16, y: u16, ana: ?*const analysis_mod.GameAnalysis, ply: usize) u16 {
     const ga = ana orelse return col;
     if (ply >= ga.count) return col;
-    const t = ga.moves[ply].tier orelse return col;
+    const t = ga.moves[ply].tier orelse analysis_mod.tierFromCpl(ga.moves[ply].cpl);
     const gx = col + 1;
     if (gx >= win.width) return col; // no room in a narrow panel
     return renderer.writeStr(win, gx, y, renderer.tierGlyph(t), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
@@ -552,4 +551,62 @@ test "viewer: stepping without F leaves orientation untoggled (mixed-color re-en
     _ = v.handleInput(fakeKey(vaxis.Key.right, .{}));
     // No F press => main never persists this game's orientation to the next.
     try std.testing.expect(!v.user_toggled);
+}
+
+fn scrapePanel(screen: *vaxis.Screen, w: u16, h: u16, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (0..h) |r| {
+        for (0..w) |c| {
+            const cell = screen.readCell(@intCast(c), @intCast(r)) orelse continue;
+            for (cell.char.grapheme) |ch| if (n < buf.len) {
+                buf[n] = ch;
+                n += 1;
+            };
+        }
+    }
+    return buf[0..n];
+}
+
+test "renderAnalysisLines shows the Move quality line for an engine ply (AE7)" {
+    const alloc = std.testing.allocator;
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var ga = analysis_mod.GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 0, .tier = .good });
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 120, .tier = null }); // engine ply
+
+    var v = ViewerState.init(&boards, &sans, 2);
+    v.position = 2; // position after the engine's ply 1
+    v.analysis = &ga;
+    v.analysis_state = .ready;
+
+    var screen = try vaxis.Screen.init(alloc, .{ .rows = 20, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(alloc);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 20, .screen = &screen };
+    _ = v.renderAnalysisLines(win, 0, &ga);
+
+    var buf: [2048]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, scrapePanel(&screen, 40, 20, &buf), "mistake") != null);
+}
+
+test "renderAnalysisLines uses the stored tier for a player ply" {
+    const alloc = std.testing.allocator;
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var ga = analysis_mod.GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 0, .tier = .good });
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 120, .tier = null });
+
+    var v = ViewerState.init(&boards, &sans, 2);
+    v.position = 1; // after the player's ply 0 (stored tier .good)
+    v.analysis = &ga;
+    v.analysis_state = .ready;
+
+    var screen = try vaxis.Screen.init(alloc, .{ .rows = 20, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(alloc);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 20, .screen = &screen };
+    _ = v.renderAnalysisLines(win, 0, &ga);
+
+    var buf: [2048]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, scrapePanel(&screen, 20, 20, &buf), "good") != null);
 }

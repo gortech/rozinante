@@ -126,6 +126,13 @@ pub const GameAnalysis = struct {
 /// Result of rating one played move.
 pub const RatedMove = struct { cpl: i32, tier: Tier };
 
+/// Map a centipawn loss to a quality tier. Shared by `rateMove` (player plies)
+/// and the review viewer, which derives engine-ply tiers from the always-present
+/// `cpl` (R16).
+pub fn tierFromCpl(cpl: i32) Tier {
+    return if (cpl >= bad_threshold) .bad else if (cpl >= meh_threshold) .meh else .good;
+}
+
 /// Rate a played move from the *mover's* perspective (works for either color — the
 /// negation flips the opponent-POV after-eval back to the mover).
 ///   best_eval:  eval of the best line at the position BEFORE the move (mover POV).
@@ -134,7 +141,7 @@ pub fn rateMove(best_eval: Eval, eval_after: Eval) RatedMove {
     const after_mover: i64 = -@as(i64, eval_after.toCp()); // flip opponent POV → mover POV
     const loss: i64 = @as(i64, best_eval.toCp()) - after_mover;
     const cpl: i32 = if (loss > 0) @intCast(@min(loss, std.math.maxInt(i32))) else 0;
-    const tier: Tier = if (cpl >= bad_threshold) .bad else if (cpl >= meh_threshold) .meh else .good;
+    const tier: Tier = tierFromCpl(cpl);
     return .{ .cpl = cpl, .tier = tier };
 }
 
@@ -424,4 +431,13 @@ test "buildFromEvals: Black player tiers only Black plies" {
     buildFromEvals(&ga, &boards, &best_evals, &bests, .{ .cp = 10 }, .black);
     try std.testing.expectEqual(@as(?Tier, null), ga.moves[0].tier); // white ply = engine
     try std.testing.expect(ga.moves[1].tier != null); // black ply = player
+}
+
+test "tierFromCpl maps boundary values (R16)" {
+    try std.testing.expectEqual(Tier.good, tierFromCpl(0));
+    try std.testing.expectEqual(Tier.good, tierFromCpl(49));
+    try std.testing.expectEqual(Tier.meh, tierFromCpl(50));
+    try std.testing.expectEqual(Tier.meh, tierFromCpl(99));
+    try std.testing.expectEqual(Tier.bad, tierFromCpl(100));
+    try std.testing.expectEqual(Tier.bad, tierFromCpl(300));
 }
