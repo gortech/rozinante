@@ -7,6 +7,7 @@ const analysis_mod = @import("../analysis.zig");
 
 const Theme = &renderer.Theme;
 const Window = vaxis.Window;
+const keybar = @import("keybar.zig");
 
 pub const ViewerAction = enum {
     none,
@@ -154,7 +155,7 @@ pub const ViewerState = struct {
         const board_w = renderer.boardWidth(opts);
         const board_h = renderer.boardHeight(opts);
 
-        if (win.width < board_w or win.height < board_h) {
+        if (win.width < board_w or win.height < board_h + keybar.height) {
             renderer.renderResizeMessage(win);
             return;
         }
@@ -176,6 +177,16 @@ pub const ViewerState = struct {
             .height = board_h,
         });
         self.renderInfoPanel(info_win);
+
+        const bar_win = win.child(.{
+            .x_off = 0,
+            .y_off = win.height - keybar.height,
+            .width = win.width,
+            .height = keybar.height,
+        });
+        const show_km = self.analysis_state == .ready and
+            (if (self.analysis) |ga| ga.key_moment_count > 0 else false);
+        keybar.render(bar_win, keybar.reviewChips(show_km));
     }
 
     fn renderInfoPanel(self: *ViewerState, win: Window) void {
@@ -211,7 +222,7 @@ pub const ViewerState = struct {
             },
         }
 
-        const keybind_lines: u16 = 3;
+        const keybind_lines: u16 = 0;
         const avail_h = if (win.height > y + keybind_lines) win.height - y - keybind_lines else 0;
 
         if (avail_h > 0 and self.total > 0) {
@@ -264,11 +275,6 @@ pub const ViewerState = struct {
             }
         }
 
-        const hint_y = win.height -| 2;
-        if (hint_y > y) {
-            const hint = "\xe2\x86\x90\xe2\x86\x92 Step  Home/End  Esc Back";
-            _ = renderer.writeStr(win, 1, hint_y, hint, .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        }
     }
 
     /// Analysis panel lines for the current position: best move + eval (R4), the tier
@@ -303,8 +309,8 @@ pub const ViewerState = struct {
         }
 
         if (ga.key_moment_count > 0) {
-            // Discoverable key-moment nav (R6): n/p jump between the biggest swings.
-            var col = renderer.writeStr(win, 1, y, "n/p key moment", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            // Key-moment status (R6); the n/p jump keys live in the keybar.
+            var col = renderer.writeStr(win, 1, y, "Key moment", .{ .fg = Theme.text_dim, .bg = Theme.bg });
             if (self.key_moment_idx) |ki| {
                 col = renderer.writeStr(win, col, y, " ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
                 col = renderer.writeNum(win, col, y, @intCast(ki + 1), .{ .fg = Theme.text_primary, .bg = Theme.bg });
@@ -476,5 +482,33 @@ test "viewer paints the best-move SAN + eval (not a dangling slice)" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Best") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "e4") != null); // the best-move SAN must paint
     try std.testing.expect(std.mem.indexOf(u8, text, "+0.3") != null); // and its eval
-    try std.testing.expect(std.mem.indexOf(u8, text, "n/p") != null); // key-moment nav is discoverable
+    try std.testing.expect(std.mem.indexOf(u8, text, "Key moment") != null); // key-moment status shows in the panel
+}
+
+test "viewer paints the keybar on the bottom row below the board at min height (AE11)" {
+    const alloc = std.testing.allocator;
+    const boards = [_]chess.Board{chess.Board.initial};
+    const sans: [1]pgn.SanNotation = undefined;
+    var v = ViewerState.init(&boards, &sans, 0);
+
+    const board_h = renderer.boardHeight(.{});
+    const h: u16 = board_h + keybar.height;
+    const w: u16 = 130;
+    var screen = try vaxis.Screen.init(alloc, .{ .rows = h, .cols = w, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(alloc);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = w, .height = h, .screen = &screen };
+    v.render(win);
+
+    // The bar (review's Back chip) must paint on the last row — proving the guard
+    // passed (board fit) and the bar sits below the board without overlap.
+    var buf: [512]u8 = undefined;
+    var n: usize = 0;
+    for (0..w) |c| {
+        const cell = screen.readCell(@intCast(c), h - 1) orelse continue;
+        for (cell.char.grapheme) |ch| if (n < buf.len) {
+            buf[n] = ch;
+            n += 1;
+        };
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "Back") != null);
 }

@@ -11,6 +11,7 @@ const MenuAction = rozinante.tui.menu.MenuAction;
 const PlayerColor = rozinante.tui.menu.PlayerColor;
 const HistoryScreen = rozinante.tui.history.HistoryScreen;
 const ViewerState = rozinante.tui.viewer.ViewerState;
+const keybar = rozinante.tui.keybar;
 const engine_mod = rozinante.engine;
 const analysis_mod = rozinante.analysis;
 const openings = rozinante.openings;
@@ -128,7 +129,7 @@ fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Eng
 // Resize gate, derived from renderer geometry so a cell-size change auto-propagates.
 const min_info_w: u16 = 19; // info-panel columns right of the board (info_x = board_w + 1)
 const MIN_W: u16 = renderer.boardWidth(.{}) + 1 + min_info_w;
-const MIN_H: u16 = renderer.boardHeight(.{});
+const MIN_H: u16 = renderer.boardHeight(.{}) + keybar.height;
 
 fn fits(width: u16, height: u16) bool {
     return width >= MIN_W and height >= MIN_H;
@@ -396,6 +397,14 @@ fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
             .height = board_h,
         });
         renderer.renderInfoPanel(info_win, game_state);
+
+        const bar_win = win.child(.{
+            .x_off = 0,
+            .y_off = win.height - keybar.height,
+            .width = win.width,
+            .height = keybar.height,
+        });
+        keybar.render(bar_win, keybar.gameChips(game_state));
     } else {
         renderer.renderResizeMessage(win);
     }

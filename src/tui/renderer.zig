@@ -636,16 +636,14 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     if (game.promotion_pending) |pp| {
         renderPromotionStatus(win, 1, y, pp, game);
         y += 1;
-        _ = writeStr(win, 1, y, "\u{2190}\u{2192} cycle  Enter confirm  Esc cancel", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        y += 1;
     } else if (game.resign_pending) {
-        _ = writeStr(win, 1, y, "Resign? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        _ = writeStr(win, 1, y, "Resign?", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         y += 1;
     } else if (game.quit_pending) {
-        _ = writeStr(win, 1, y, "Quit game? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        _ = writeStr(win, 1, y, "Quit game?", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         y += 1;
     } else if (game.leave_pending) {
-        _ = writeStr(win, 1, y, "Leave to menu? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        _ = writeStr(win, 1, y, "Leave to menu?", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         y += 1;
     } else if (game.game_phase == .ended) {
         if (game.result) |result| {
@@ -653,8 +651,6 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
         }
         y += 1;
         renderSummaryCard(win, game, y);
-        const hint_y = win.height -| 2;
-        _ = writeStr(win, 1, hint_y, "R Review  N Menu  Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         return;
     } else if (game.engine_state == .thinking) {
         const spinners = [_][]const u8{ "|", "/", "-", "\\" };
@@ -705,7 +701,7 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     }
 
     // Move history
-    const keybind_lines: u16 = 3;
+    const keybind_lines: u16 = 0;
     const avail_h = if (win.height > y + keybind_lines) win.height - y - keybind_lines else 0;
 
     if (avail_h > 0 and game.move_count > 0) {
@@ -737,15 +733,6 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
         }
     }
 
-    // Keybind hints at bottom
-    const hint_y = win.height -| 2;
-    if (hint_y > y) {
-        _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select  U Undo", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        var hint_col = writeStr(win, 1, hint_y + 1, "R Resign N Menu F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        hint_col = writeStr(win, hint_col + 1, hint_y + 1, "H Hints", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        const hint_status: []const u8 = if (game.hints_enabled) " On" else " Off";
-        _ = writeStr(win, hint_col, hint_y + 1, hint_status, .{ .fg = Theme.text_dim, .bg = Theme.bg });
-    }
 }
 
 pub fn renderResizeMessage(win: Window) void {
@@ -1087,4 +1074,14 @@ test "summary card shows em dash when accuracy is null (no rated move)" {
     const text = renderPanelToText(&buf, &game, 30);
     try testing.expect(std.mem.indexOf(u8, text, "Accuracy") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\u{2014}") != null);
+}
+
+test "renderInfoPanel: in-game keys live in the keybar, not the panel (AE10)" {
+    var game = Game.init();
+    var buf: [4096]u8 = undefined;
+    const text = renderPanelToText(&buf, &game, 30);
+    // The footer keys moved to the bottom bar; the panel must not duplicate them.
+    try testing.expect(std.mem.indexOf(u8, text, "Undo") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "Resign") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "Flip") == null);
 }

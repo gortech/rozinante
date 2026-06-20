@@ -4,6 +4,7 @@ const Window = vaxis.Window;
 const renderer = @import("renderer.zig");
 const engine = @import("../engine.zig");
 const Theme = &renderer.Theme;
+const keybar = @import("keybar.zig");
 
 pub const PlayerColor = enum {
     white,
@@ -176,7 +177,7 @@ pub const Menu = struct {
     pub fn render(self: *const Menu, win: Window) void {
         win.fill(.{ .style = .{ .bg = Theme.bg } });
 
-        if (win.width < 20 or win.height < 14) {
+        if (win.width < 20 or win.height < 14 + keybar.height) {
             _ = renderer.writeStr(win, 1, win.height / 2, "Terminal too small", .{ .fg = Theme.text_primary, .bg = Theme.bg });
             return;
         }
@@ -186,7 +187,8 @@ pub const Menu = struct {
         if (self.has_resume_game) item_count += 1;
         const content_h: u16 = item_count * 2 + 3;
         const x0: u16 = if (win.width > content_w) (win.width - content_w) / 2 else 0;
-        const y0: u16 = if (win.height > content_h) (win.height - content_h) / 2 else 0;
+        const body_h: u16 = win.height -| keybar.height;
+        const y0: u16 = if (body_h > content_h) (body_h - content_h) / 2 else 0;
 
         var y = y0;
 
@@ -275,11 +277,14 @@ pub const Menu = struct {
         }
         y += 2;
 
-        // Hints
-        const hint = "\xe2\x86\x91\xe2\x86\x93 Navigate  \xe2\x86\x90\xe2\x86\x92 Adjust  Enter Select  Q Quit";
-        const hint_y = if (win.height > 2) win.height - 2 else y;
-        const hint_x = if (win.width > 50) (win.width - 50) / 2 else 0;
-        _ = renderer.writeStr(win, hint_x, hint_y, hint, .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        // Keybind bar
+        const bar_win = win.child(.{
+            .x_off = 0,
+            .y_off = win.height - keybar.height,
+            .width = win.width,
+            .height = keybar.height,
+        });
+        keybar.render(bar_win, keybar.menuChips());
     }
 
     fn fieldStyle(active: bool) Cell.Style {
