@@ -32,6 +32,8 @@ pub const Palette = struct {
     eval_good: Color,
     eval_meh: Color,
     eval_bad: Color,
+    keybar_chip_bg: Color,
+    keybar_chip_fg: Color,
 };
 
 pub const ThemeId = enum {
@@ -99,6 +101,8 @@ fn paletteOf(bg: [3]u8, dark: [3]u8, light: [3]u8, wp: [3]u8, bp: [3]u8, tp: [3]
         .eval_good = rgb(.{ 80, 210, 120 }),
         .eval_meh = rgb(.{ 230, 190, 70 }),
         .eval_bad = rgb(.{ 235, 85, 85 }),
+        .keybar_chip_bg = rgb(.{ 70, 80, 100 }),
+        .keybar_chip_fg = rgb(.{ 240, 240, 245 }),
     };
 }
 
