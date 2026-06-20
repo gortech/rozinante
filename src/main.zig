@@ -607,6 +607,13 @@ fn writeBackViewerAnalysis(
     serializeAndWriteBack(io, path, header, records, board_history, ga);
 }
 
+/// Review board orientation, persisted for the process lifetime so it survives
+/// leaving and re-entering review within a session (R15a). null until the player
+/// first toggles with F; an untoggled game always opens to its own
+/// player-perspective default, so reviewing a Black game never flips the next
+/// White game.
+var review_flipped: ?bool = null;
+
 fn runGameViewer(
     io: Io,
     alloc: std.mem.Allocator,
@@ -636,6 +643,7 @@ fn runGameViewer(
 
     var viewer = ViewerState.init(&boards, &san_list, move_count);
     viewer.player_color = viewerPlayerColor(&parsed);
+    viewer.flipped = review_flipped orelse (viewer.player_color == .black);
 
     // --- Analysis: cached if present, else backfill via a provisioned engine (U5) ---
     var pass_future: ?Io.Future(void) = null;
@@ -693,6 +701,7 @@ fn runGameViewer(
         switch (event) {
             .key_press => |key| {
                 const action = viewer.handleInput(key);
+                if (viewer.user_toggled) review_flipped = viewer.flipped;
                 switch (action) {
                     .back => return .back_to_history,
                     .none => {},

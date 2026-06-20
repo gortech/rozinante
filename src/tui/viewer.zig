@@ -32,6 +32,11 @@ pub const ViewerState = struct {
     analysis_state: AnalysisDisplay = .unavailable,
     /// Which color the human played, for player-perspective eval display (R4).
     player_color: chess.Color = .white,
+    /// Board orientation (R15): false = White at the bottom, true = flipped.
+    flipped: bool = false,
+    /// Whether the player explicitly pressed F this session; gates write-back of
+    /// the orientation so an untoggled game opens to its own default (R15a).
+    user_toggled: bool = false,
     /// Cursor into the swing-ranked key moments, null until the key is first pressed.
     key_moment_idx: ?usize = null,
     /// Scratch storage for the current frame's formatted best-move SAN and eval. It
@@ -68,6 +73,10 @@ pub const ViewerState = struct {
         }
         if (key.matches('n', .{})) self.nextKeyMoment();
         if (key.matches('p', .{})) self.prevKeyMoment();
+        if (key.matches('f', .{})) {
+            self.flipped = !self.flipped;
+            self.user_toggled = true;
+        }
         return .none;
     }
 
@@ -166,7 +175,7 @@ pub const ViewerState = struct {
             .width = board_w,
             .height = board_h,
         });
-        renderer.renderBoardCore(board_win, self.currentBoard(), opts, false, null);
+        renderer.renderBoardCore(board_win, self.currentBoard(), opts, self.flipped, null);
 
         const info_x: u16 = board_w + 1;
         const info_w = if (win.width > info_x) win.width - info_x else 0;
@@ -511,4 +520,36 @@ test "viewer paints the keybar on the bottom row below the board at min height (
         };
     }
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "Back") != null);
+}
+
+fn fakeKey(codepoint: u21, mods: vaxis.Key.Modifiers) vaxis.Key {
+    return .{ .codepoint = codepoint, .mods = mods };
+}
+
+test "viewer: F toggles orientation and marks user_toggled; stepping preserves it (AE6)" {
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var v = ViewerState.init(&boards, &sans, 1);
+    try std.testing.expect(!v.flipped and !v.user_toggled);
+
+    _ = v.handleInput(fakeKey('f', .{}));
+    try std.testing.expect(v.flipped and v.user_toggled);
+
+    // Stepping forward/backward must not change the chosen orientation.
+    _ = v.handleInput(fakeKey(vaxis.Key.left, .{}));
+    _ = v.handleInput(fakeKey(vaxis.Key.right, .{}));
+    try std.testing.expect(v.flipped);
+
+    _ = v.handleInput(fakeKey('f', .{}));
+    try std.testing.expect(!v.flipped);
+}
+
+test "viewer: stepping without F leaves orientation untoggled (mixed-color re-entry)" {
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var v = ViewerState.init(&boards, &sans, 1);
+    _ = v.handleInput(fakeKey(vaxis.Key.left, .{}));
+    _ = v.handleInput(fakeKey(vaxis.Key.right, .{}));
+    // No F press => main never persists this game's orientation to the next.
+    try std.testing.expect(!v.user_toggled);
 }
