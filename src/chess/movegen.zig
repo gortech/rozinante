@@ -34,25 +34,25 @@ pub const MoveList = struct {
     }
 };
 
-const knight_offsets = [_][2]i4{
+pub const knight_offsets = [_][2]i4{
     .{ -2, -1 }, .{ -2, 1 }, .{ -1, -2 }, .{ -1, 2 },
     .{ 1, -2 },  .{ 1, 2 },  .{ 2, -1 },  .{ 2, 1 },
 };
 
-const king_offsets = [_][2]i4{
+pub const king_offsets = [_][2]i4{
     .{ -1, -1 }, .{ -1, 0 }, .{ -1, 1 }, .{ 0, -1 },
     .{ 0, 1 },   .{ 1, -1 }, .{ 1, 0 },  .{ 1, 1 },
 };
 
-const diagonal_dirs = [_][2]i4{
+pub const diagonal_dirs = [_][2]i4{
     .{ -1, -1 }, .{ -1, 1 }, .{ 1, -1 }, .{ 1, 1 },
 };
 
-const straight_dirs = [_][2]i4{
+pub const straight_dirs = [_][2]i4{
     .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 },
 };
 
-fn offsetSquare(sq: Square, file_delta: i4, rank_delta: i4) ?Square {
+pub fn offsetSquare(sq: Square, file_delta: i4, rank_delta: i4) ?Square {
     const f: i8 = @intCast(sq.file.index());
     const r: i8 = @intCast(sq.rank.index());
     const fd: i8 = @intCast(file_delta);
