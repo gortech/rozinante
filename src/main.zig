@@ -1054,7 +1054,7 @@ pub fn main(init: std.process.Init) !void {
                             .toggle_hints => {
                                 game_state.hints_enabled = !game_state.hints_enabled;
                                 if (game_state.hints_enabled) {
-                                    game_state.computeEndangered();
+                                    game_state.recomputeHints();
                                     if (current_engine) |*eng| {
                                         dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
                                     }
@@ -1073,7 +1073,7 @@ pub fn main(init: std.process.Init) !void {
                                     cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
                                 }
                                 if (game_state.hints_enabled) {
-                                    game_state.computeEndangered();
+                                    game_state.recomputeHints();
                                     if (current_engine) |*eng| {
                                         dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
                                     }
@@ -1138,7 +1138,7 @@ pub fn main(init: std.process.Init) !void {
                             log.debug("engine move applied, move_count now {d}", .{game_state.move_count});
 
                             if (game_state.hints_enabled and game_state.isHumanTurn()) {
-                                game_state.computeEndangered();
+                                game_state.recomputeHints();
                                 if (current_engine) |*eng| {
                                     dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
                                 }

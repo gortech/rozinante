@@ -26,6 +26,8 @@ pub const Palette = struct {
     highlight_engine_move: Color,
     highlight_endangered: Color,
     highlight_hint_best: Color,
+    highlight_endangered_high: Color,
+    highlight_pin: Color,
     selection_bg: Color,
     eval_good: Color,
     eval_meh: Color,
@@ -90,7 +92,9 @@ fn paletteOf(bg: [3]u8, dark: [3]u8, light: [3]u8, wp: [3]u8, bp: [3]u8, tp: [3]
         .highlight_promotion = rgb(.{ 255, 200, 0 }),
         .highlight_engine_move = rgb(.{ 0, 220, 180 }),
         .highlight_endangered = rgb(.{ 255, 100, 50 }),
+        .highlight_endangered_high = rgb(.{ 170, 0, 30 }),
         .highlight_hint_best = rgb(.{ 50, 200, 100 }),
+        .highlight_pin = rgb(.{ 60, 110, 255 }),
         .selection_bg = rgb(sel),
         .eval_good = rgb(.{ 80, 210, 120 }),
         .eval_meh = rgb(.{ 230, 190, 70 }),
@@ -165,7 +169,8 @@ pub const BorderStyle = enum { selected, capture, check, flash, engine };
 pub const Marks = struct {
     border: ?BorderStyle = null,
     cursor: bool = false,
-    endangered: bool = false,
+    endangered: game_mod.EndangeredLevel = .none,
+    pin: bool = false,
     best_move: bool = false,
     center: bool = false,
 };
@@ -209,6 +214,7 @@ pub fn squareMarks(game: *const Game, sq_idx: u6) Marks {
 
     if (game.hints_enabled) {
         marks.endangered = game.hint_endangered[sq_idx];
+        marks.pin = game.hint_pinned[sq_idx];
         if (game.hint_best_move) |bm|
             marks.best_move = bm.from.toIndex() == sq_idx or bm.to.toIndex() == sq_idx;
     }
@@ -333,10 +339,15 @@ pub fn drawMarks(win: Window, cx: u16, ry: u16, opts: RenderOptions, marks: Mark
     }
 
     // Layer 3: hint corners — thick, edge-aligned (compose).
+    if (marks.pin)
+        hRun(win, left, left + 1, top, FULL, Theme.highlight_pin, base); // █ top-left
     if (marks.best_move)
-        hRun(win, right - 1, right, top, FULL, Theme.highlight_hint_best, base); // ▀ top-right
-    if (marks.endangered)
-        hRun(win, left, left + 1, bottom, FULL, Theme.highlight_endangered, base); // ▄ bottom-left
+        hRun(win, right - 1, right, top, FULL, Theme.highlight_hint_best, base); // █ top-right
+    switch (marks.endangered) {
+        .none => {},
+        .orange => hRun(win, left, left + 1, bottom, FULL, Theme.highlight_endangered, base), // █ bottom-left
+        .red => hRun(win, left, left + 1, bottom, FULL, Theme.highlight_endangered_high, base),
+    }
 
     // Layer 4: cursor — thick bright segments at the middle of each edge (top
     // layer, most visible).
@@ -776,15 +787,28 @@ test "squareMarks: capture composes with endangered and best-move corners (AE2)"
     game.board.squares[sq.toIndex()] = chess.Piece.init(.black, .knight);
     game.legal_targets[sq.toIndex()] = true;
     game.hints_enabled = true;
-    game.hint_endangered[sq.toIndex()] = true;
+    game.hint_endangered[sq.toIndex()] = .red;
     game.hint_best_move = .{ .from = chess.Square.init(.a, .@"1"), .to = sq };
 
     const m = squareMarks(&game, sq.toIndex());
     try testing.expectEqual(BorderStyle.capture, m.border.?);
-    try testing.expect(m.endangered);
+    try testing.expect(m.endangered == .red);
     try testing.expect(m.best_move);
     // from-arm of the best_move disjunction (bm.from == sq)
     try testing.expect(squareMarks(&game, chess.Square.init(.a, .@"1").toIndex()).best_move);
+}
+
+test "squareMarks: pin and endangered level surface when hints on" {
+    var game = Game.init();
+    game.board = chess.Board.empty();
+    const sq = chess.Square.init(.d, .@"4");
+    game.board.squares[sq.toIndex()] = chess.Piece.init(.white, .knight);
+    game.hints_enabled = true;
+    game.hint_endangered[sq.toIndex()] = .red;
+    game.hint_pinned[sq.toIndex()] = true;
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expect(m.endangered == .red);
+    try testing.expect(m.pin);
 }
 
 test "squareMarks: check outranks selected on the king square (AE3)" {
@@ -876,11 +900,13 @@ test "squareMarks: hints disabled suppresses endangered and best-move" {
     var game = Game.init();
     game.hints_enabled = false;
     const sq = chess.Square.init(.a, .@"8");
-    game.hint_endangered[sq.toIndex()] = true;
+    game.hint_endangered[sq.toIndex()] = .red;
+    game.hint_pinned[sq.toIndex()] = true;
     game.hint_best_move = .{ .from = sq, .to = chess.Square.init(.a, .@"7") };
 
     const m = squareMarks(&game, sq.toIndex());
-    try testing.expect(!m.endangered);
+    try testing.expect(m.endangered == .none);
+    try testing.expect(!m.pin);
     try testing.expect(!m.best_move);
 }
 
@@ -892,7 +918,7 @@ test "squareMarks: quiet empty square has no marks" {
 
     const m = squareMarks(&game, sq.toIndex());
     try testing.expect(m.border == null);
-    try testing.expect(!m.cursor and !m.endangered and !m.best_move and !m.center);
+    try testing.expect(!m.cursor and m.endangered == .none and !m.best_move and !m.center and !m.pin);
 }
 
 test "drawMarks: writes nothing below the minimum cell size (guard)" {
@@ -906,7 +932,7 @@ test "drawMarks: writes nothing below the minimum cell size (guard)" {
         }
     }
 
-    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = .red, .pin = true, .best_move = true, .center = true };
     drawMarks(win, 2, 2, .{ .cell_w = 11, .cell_h = 6 }, marks, Theme.dark_square);
 
     for (0..20) |y| {
@@ -929,7 +955,7 @@ test "drawMarks: marks stay inside the cell rect (containment)" {
 
     const cx: u16 = 2;
     const ry: u16 = 2;
-    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = .red, .pin = true, .best_move = true, .center = true };
     drawMarks(win, cx, ry, .{}, marks, Theme.dark_square);
 
     // It actually drew: the cell's top-left corner is now a (multi-byte) mark glyph, not the sentinel.
@@ -955,13 +981,35 @@ test "palette: classic reproduces the original RGBs (R12)" {
     try testing.expectEqual(Color{ .rgb = .{ 105, 70, 150 } }, p.light_square);
 }
 
-test "palette: marks pairwise-distinct and distinct from squares for every theme (R10)" {
+fn colorDist2(a: Color, b: Color) u32 {
+    var sum: u32 = 0;
+    for (0..3) |k| {
+        const d = @as(i32, a.rgb[k]) - @as(i32, b.rgb[k]);
+        sum += @intCast(d * d);
+    }
+    return sum;
+}
+
+test "palette: marks pairwise-distinct and distinct from squares for every theme (R10, R13)" {
+    // R13: pairs involving a new color (pin, endangered-high) must clear a
+    // perceptual delta; existing-vs-existing pairs keep bare inequality so no
+    // shipped color is retuned (e.g. check red and flash red are only ~50 apart).
+    const min_delta2: u32 = 60 * 60; // squared Euclidean RGB threshold
     for ([_]ThemeId{ .classic, .wood, .green, .blue }) |id| {
         const p = palette(id);
-        const marks = [_]Color{ p.highlight_cursor, p.highlight_legal, p.highlight_check, p.highlight_endangered, p.highlight_hint_best };
+        const marks = [_]Color{
+            p.highlight_cursor, p.highlight_legal,      p.highlight_check,
+            p.highlight_flash,  p.highlight_endangered, p.highlight_hint_best,
+            p.highlight_pin,    p.highlight_endangered_high,
+        };
+        const first_new = 6; // indices >= 6 are the new colors
         for (marks, 0..) |a, i| {
-            for (marks[i + 1 ..]) |b| {
-                try testing.expect(!std.meta.eql(a, b));
+            for (marks[i + 1 ..], i + 1..) |b, j| {
+                if (i >= first_new or j >= first_new) {
+                    try testing.expect(colorDist2(a, b) >= min_delta2);
+                } else {
+                    try testing.expect(!std.meta.eql(a, b));
+                }
             }
             try testing.expect(!std.meta.eql(a, p.dark_square));
             try testing.expect(!std.meta.eql(a, p.light_square));

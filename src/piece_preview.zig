@@ -62,13 +62,13 @@ const samples = [_]Sample{
     .{ .label = "legal (empty)", .marks = .{ .center = true } },
     .{ .label = "capture", .marks = .{ .border = .capture } },
     .{ .label = "check", .marks = .{ .border = .check } },
-    .{ .label = "endangered", .marks = .{ .endangered = true } },
+    .{ .label = "endangered", .marks = .{ .endangered = .orange } },
     .{ .label = "best move", .marks = .{ .best_move = true } },
     .{ .label = "engine move", .marks = .{ .border = .engine } },
     .{ .label = "capture flash", .marks = .{ .border = .flash } },
-    .{ .label = "cap+endgr+best", .marks = .{ .border = .capture, .endangered = true, .best_move = true } },
+    .{ .label = "cap+endgr+best", .marks = .{ .border = .capture, .endangered = .red, .best_move = true } },
     .{ .label = "selected+cursor", .marks = .{ .border = .selected, .cursor = true } },
-    .{ .label = "MAX stack", .marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true } },
+    .{ .label = "MAX stack", .marks = .{ .border = .capture, .cursor = true, .endangered = .red, .best_move = true } },
 };
 
 const gallery_cols: u16 = 4;
