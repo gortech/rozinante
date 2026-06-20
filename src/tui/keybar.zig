@@ -280,3 +280,25 @@ fn colorDist2(a: vaxis.Cell.Color, b: vaxis.Cell.Color) u32 {
     }
     return sum;
 }
+
+test "render paints chips and clips at tiny widths without crashing" {
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .rows = 1, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    const win = Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 1, .screen = &screen };
+    render(win, menuChips());
+
+    var buf: [256]u8 = undefined;
+    var n: usize = 0;
+    for (0..40) |c| {
+        const cell = screen.readCell(@intCast(c), 0) orelse continue;
+        for (cell.char.grapheme) |ch| if (n < buf.len) {
+            buf[n] = ch;
+            n += 1;
+        };
+    }
+    try testing.expect(std.mem.indexOf(u8, buf[0..n], "Navigate") != null);
+
+    // Too narrow for even one chip: renders nothing, no crash.
+    const tiny = Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 1, .height = 1, .screen = &screen };
+    render(tiny, menuChips());
+}

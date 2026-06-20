@@ -732,7 +732,6 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
             y += 1;
         }
     }
-
 }
 
 pub fn renderResizeMessage(win: Window) void {
@@ -989,8 +988,8 @@ test "palette: marks pairwise-distinct and distinct from squares for every theme
     for ([_]ThemeId{ .classic, .wood, .green, .blue }) |id| {
         const p = palette(id);
         const marks = [_]Color{
-            p.highlight_cursor, p.highlight_legal,      p.highlight_check,
-            p.highlight_flash,  p.highlight_endangered, p.highlight_hint_best,
+            p.highlight_cursor, p.highlight_legal,           p.highlight_check,
+            p.highlight_flash,  p.highlight_endangered,      p.highlight_hint_best,
             p.highlight_pin,    p.highlight_endangered_high,
         };
         const first_new = 6; // indices >= 6 are the new colors

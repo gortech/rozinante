@@ -283,7 +283,6 @@ pub const ViewerState = struct {
                 y += 1;
             }
         }
-
     }
 
     /// Analysis panel lines for the current position: best move + eval (R4), the tier
