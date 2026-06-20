@@ -7,6 +7,7 @@ pub const engine = @import("engine.zig");
 pub const openings = @import("openings.zig");
 pub const tui = @import("tui.zig");
 pub const persistence = @import("persistence.zig");
+pub const analysis = @import("analysis.zig");
 
 test {
     std.testing.refAllDecls(@This());

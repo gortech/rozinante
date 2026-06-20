@@ -3,6 +3,7 @@ const Io = std.Io;
 const Dir = std.Io.Dir;
 const Allocator = std.mem.Allocator;
 const known_folders = @import("known_folders");
+const pgn = @import("pgn.zig");
 
 const log = std.log.scoped(.persistence);
 
@@ -15,6 +16,10 @@ pub const GameInfo = struct {
     player_color: []const u8,
     result: []const u8,
     is_finished: bool,
+    /// Analysis summary from the [RozAnalysis] tag; null when the game is unanalyzed (U8).
+    blunders: ?u16 = null,
+    inaccuracies: ?u16 = null,
+    accuracy: ?f32 = null,
 };
 
 pub const SaveGameData = struct {
@@ -95,6 +100,39 @@ pub fn saveGame(allocator: Allocator, io: Io, data_dir: []const u8, game: SaveGa
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ data_dir, filename });
 }
 
+/// Atomically overwrite an existing game file *in place* with new (annotated) content.
+/// Unlike `saveGame` — which regenerates the filename from date/elo/color and would
+/// create a NEW file — this targets the opened file's own path, so analysis write-back
+/// updates the game the player actually opened rather than spawning a duplicate
+/// (R10 atomic, R11/AE2 caching).
+pub fn writeAnalyzedPgn(io: Io, filepath: []const u8, content: []const u8) !void {
+    const sep = std.mem.lastIndexOfScalar(u8, filepath, '/') orelse return error.InvalidPath;
+    const dir_path = filepath[0..sep];
+    const filename = filepath[sep + 1 ..];
+
+    var dir = Dir.openDirAbsolute(io, dir_path, .{}) catch |err| {
+        log.err("failed to open data directory {s}: {}", .{ dir_path, err });
+        return err;
+    };
+    defer dir.close(io);
+
+    var atomic = dir.createFileAtomic(io, filename, .{ .replace = true }) catch |err| {
+        log.err("failed to create atomic file: {}", .{err});
+        return err;
+    };
+    errdefer atomic.deinit(io);
+
+    atomic.file.writeStreamingAll(io, content) catch |err| {
+        log.err("failed to write analyzed game: {}", .{err});
+        return err;
+    };
+
+    atomic.replace(io) catch |err| {
+        log.err("failed to atomically replace file: {}", .{err});
+        return err;
+    };
+}
+
 pub fn loadGame(allocator: Allocator, io: Io, filepath: []const u8) ![]const u8 {
     const content = Dir.cwd().readFileAlloc(io, filepath, allocator, .limited(1024 * 1024)) catch |err| {
         log.err("failed to load game from {s}: {}", .{ filepath, err });
@@ -125,8 +163,14 @@ pub fn listGames(allocator: Allocator, io: Io, data_dir: []const u8) ![]GameInfo
 
         const info = parseFilename(allocator, name) orelse continue;
 
-        const result_tag = readResultTag(allocator, io, dir, name) catch "*";
+        // One read per file yields both the result tag and the analysis header. The
+        // limit matches loadGame (1 MB): readFileAlloc errors at the limit rather than
+        // truncating, and annotation inflates long games past a smaller bound.
+        const content: ?[]const u8 = dir.readFileAlloc(io, name, allocator, .limited(1024 * 1024)) catch null;
+        defer if (content) |c| allocator.free(c);
+        const result_tag = if (content) |c| extractResultTag(allocator, c) else (allocator.dupe(u8, "*") catch "*");
         const is_finished = !std.mem.eql(u8, result_tag, "*");
+        const hdr: ?pgn.RozHeader = if (content) |c| pgn.readAnalysisHeader(c) else null;
 
         games.append(allocator, .{
             .filename = info.filename,
@@ -135,6 +179,9 @@ pub fn listGames(allocator: Allocator, io: Io, data_dir: []const u8) ![]GameInfo
             .player_color = info.player_color,
             .result = result_tag,
             .is_finished = is_finished,
+            .blunders = if (hdr) |h| h.blunders else null,
+            .inaccuracies = if (hdr) |h| h.inaccuracies else null,
+            .accuracy = if (hdr) |h| h.accuracy else null,
         }) catch |err| {
             log.err("failed to collect game info: {}", .{err});
             return err;
@@ -202,13 +249,9 @@ fn parseFilename(allocator: Allocator, name: []const u8) ?ParsedFilename {
     };
 }
 
-fn readResultTag(allocator: Allocator, io: Io, dir: Dir, filename: []const u8) ![]const u8 {
-    const content = dir.readFileAlloc(io, filename, allocator, .limited(8192)) catch {
-        return "*";
-    };
-    defer allocator.free(content);
-
-    // Look for [Result "..."] tag
+/// Extract the [Result "..."] tag value from already-read PGN content (dup'd; "*" if
+/// absent). Split from the file read so `listGames` reads each file only once.
+fn extractResultTag(allocator: Allocator, content: []const u8) []const u8 {
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
@@ -338,4 +381,72 @@ test "listGames on missing directory returns empty" {
     const io = getTestIo();
     const games = try listGames(std.testing.allocator, io, "/tmp/rozinante-nonexistent-dir-42");
     try std.testing.expectEqual(@as(usize, 0), games.len);
+}
+
+test "writeAnalyzedPgn overwrites the opened file in place (no duplicate)" {
+    const io = getTestIo();
+    const allocator = std.testing.allocator;
+
+    const tmp_dir = "/tmp/rozinante-test-analyzed";
+    Dir.cwd().createDirPath(io, tmp_dir) catch {};
+    defer cleanupTestDir(io, tmp_dir);
+
+    const path = try saveGame(allocator, io, tmp_dir, .{
+        .pgn_content = "[Event \"T\"]\n[Result \"1-0\"]\n\n1. e4 1-0\n",
+        .date_secs = 1783529422,
+        .elo = 1200,
+        .color = "white",
+    });
+    defer allocator.free(path);
+
+    const annotated = "[Event \"T\"]\n[Result \"1-0\"]\n[RozAnalysis \"v1 plies=1 bad=0 meh=0 acc=99.0\"]\n\n1. e4 {roz: good best=e4 eval=30 cpl=0} 1-0\n";
+    try writeAnalyzedPgn(io, path, annotated);
+
+    const loaded = try loadGame(allocator, io, path);
+    defer allocator.free(loaded);
+    try std.testing.expectEqualStrings(annotated, loaded);
+
+    // The in-place write must NOT spawn a second file (the saveGame-regenerates-filename bug).
+    var dir = try Dir.openDirAbsolute(io, tmp_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (it.next(io) catch null) |e| {
+        if (e.kind == .file) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "listGames reads annotated games larger than the old 8KB limit (regression)" {
+    const io = getTestIo();
+    const allocator = std.testing.allocator;
+    const tmp_dir = "/tmp/rozinante-test-biglist";
+    Dir.cwd().createDirPath(io, tmp_dir) catch {};
+    defer cleanupTestDir(io, tmp_dir);
+
+    // A finished, analyzed game whose text exceeds 8192 bytes — annotation inflates long
+    // games past the old read limit, which errored (not truncated), losing the tags.
+    var buf: [12000]u8 = undefined;
+    const head = "[Event \"T\"]\n[Result \"1-0\"]\n[RozAnalysis \"v1 plies=2 bad=1 meh=0 acc=80.0\"]\n\n1. e4 e5 1-0\n";
+    @memcpy(buf[0..head.len], head);
+    @memset(buf[head.len..], 'X');
+    const content = buf[0 .. head.len + 9000];
+
+    const path = try saveGame(allocator, io, tmp_dir, .{ .pgn_content = content, .date_secs = 1783529422, .elo = 1200, .color = "white" });
+    defer allocator.free(path);
+
+    const games = try listGames(allocator, io, tmp_dir);
+    defer {
+        for (games) |g| {
+            allocator.free(g.filename);
+            allocator.free(g.date);
+            allocator.free(g.player_color);
+            allocator.free(g.result);
+        }
+        allocator.free(games);
+    }
+    try std.testing.expectEqual(@as(usize, 1), games.len);
+    try std.testing.expect(games[0].is_finished);
+    try std.testing.expectEqual(@as(?u16, 1), games[0].blunders);
+    try std.testing.expect(games[0].accuracy != null);
 }

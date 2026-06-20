@@ -6,7 +6,7 @@ Terminal chess learning game in Zig: play Stockfish at a chosen difficulty (a si
 
 - `zig build` — compile the `rozinante` executable
 - `zig build run` — build and run
-- `zig build test` — all tests (module + executable passes, run in parallel); 274 currently pass
+- `zig build test` — all tests (module + executable passes, run in parallel); 312 currently pass
 - `zig build preview` — piece sprite preview and the highlight-mark gallery (every state, combo, light/dark, with/without a piece, plus a legend; needs a terminal at least ~104×64)
 
 ## Stack

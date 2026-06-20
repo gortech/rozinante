@@ -1,0 +1,427 @@
+//! Post-game analysis: evaluation representation, move rating, and per-game
+//! aggregates. Pure — depends only on `chess`. No engine, no I/O, no allocator
+//! (matches the `src/chess/` convention: stack arrays, table-driven, allocator-free).
+//!
+//! U1 seeds `Eval` + `toCp` (the single comparison currency); U2 adds the rating
+//! model (`Tier`, `MoveAnalysis`, `GameAnalysis`, `rateMove`, `aggregate`,
+//! `computeKeyMoments`).
+
+const std = @import("std");
+const chess = @import("chess.zig");
+
+/// A position evaluation from the side-to-move's perspective, as reported by the
+/// engine. `cp` is centipawns; `mate` is signed mate-in-N (positive = the side to
+/// move delivers mate in N plies/moves, negative = the side to move gets mated).
+///
+/// Keeping mate distinct from cp is what lets a missed or allowed forced mate rate
+/// as a blunder and top the key-moment ranking instead of parsing as 0.00 (R3/AE4).
+pub const Eval = union(enum) {
+    cp: i32,
+    mate: i32,
+
+    /// Centipawn magnitude a mate saturates to before the mate distance is
+    /// subtracted. Chosen to dominate any centipawn value the engine ever reports
+    /// (Stockfish emits `mate` rather than cp once a forced mate exists, so real cp
+    /// never approaches this), so a mate always outranks material in comparisons.
+    pub const mate_base: i32 = 100_000;
+
+    /// Collapse to one signed centipawn currency for comparison and ranking.
+    /// A mate maps to ±(mate_base − |N|): a closer mate dominates a farther one, and
+    /// either sign dominates any cp value. The only comparison currency the rating
+    /// model uses. Overflow-safe: widens to i64 so a garbage `mate` value can't trap.
+    pub fn toCp(self: Eval) i32 {
+        return switch (self) {
+            .cp => |c| c,
+            .mate => |n| blk: {
+                const n64: i64 = n;
+                const dist: i64 = if (n64 < 0) -n64 else n64;
+                const clamped: i64 = @min(dist, @as(i64, mate_base) - 1);
+                const mag: i32 = @intCast(@as(i64, mate_base) - clamped);
+                break :blk if (n < 0) -mag else mag;
+            },
+        };
+    }
+};
+
+/// Mirrors `persistence/pgn.MAX_GAME_MOVES`; analysis is chess-pure and cannot import
+/// persistence, so the value is duplicated here. U3 adds a comptime assert in pgn.zig
+/// tying them together. A game is at most this many plies.
+pub const max_plies = 512;
+
+/// How many biggest-swing plies the key-moment navigation keeps (R6). Small on purpose:
+/// n/p cycles a handful of turning points, presented in chronological order.
+pub const max_key_moments = 5;
+
+/// Current on-disk analysis format version. Bumping it invalidates older cached
+/// analysis so it is recomputed rather than trusted (U3 completeness gate).
+pub const current_version: u8 = 1;
+
+/// Centipawn-loss tier boundaries, from lichess move classification: an inaccuracy is
+/// ≥ 50 cp; a mistake (≥ 100) and a blunder (≥ 300) collapse into `bad` — the headline
+/// "blunder/mistake count". Tunable, not invented.
+pub const meh_threshold: i32 = 50;
+pub const bad_threshold: i32 = 100;
+
+/// Quality of a player's move by centipawn loss vs the engine's best.
+pub const Tier = enum { good, meh, bad };
+
+/// Per-ply analysis. `eval`/`best_eval` are engine output (side-to-move POV at the
+/// respective position); `cpl` and `tier` are derived. `tier` is set only on the
+/// player's plies — engine plies carry `eval`/`cpl` (feeding swings) but `tier == null`.
+pub const MoveAnalysis = struct {
+    /// Eval of the position AFTER this move (its side-to-move = the mover's opponent).
+    eval: Eval,
+    /// Engine's best move at the position BEFORE this move; null if unknown.
+    best: ?chess.Move,
+    /// Eval of that best line, from the mover's perspective (the mover is to move there).
+    best_eval: Eval,
+    /// Centipawn loss vs best, from the mover's perspective (≥ 0). Computed for every
+    /// ply (drives key-moment ranking), not just player plies.
+    cpl: i32,
+    /// Quality tier — player plies only; null for engine plies.
+    tier: ?Tier,
+};
+
+/// A full game's analysis. Fixed stack arrays (no allocator), like `MoveList`.
+pub const GameAnalysis = struct {
+    moves: [max_plies]MoveAnalysis = undefined,
+    count: u16 = 0,
+
+    // Player aggregates (filled by `finalize`).
+    blunders: u16 = 0,
+    inaccuracies: u16 = 0,
+    /// Win-probability accuracy in [0, 100]; null when the player made no rated move
+    /// (e.g. resigned before moving) — never NaN.
+    accuracy: ?f32 = null,
+
+    /// Biggest-swing plies, descending; valid range `key_moments[0..key_moment_count]`.
+    key_moments: [max_key_moments]u16 = undefined,
+    key_moment_count: u8 = 0,
+
+    // Completeness marker (R11).
+    version: u8 = current_version,
+    plies_covered: u16 = 0,
+
+    /// Append one ply's analysis. The caller (U4 pass) computes `cpl`/`tier` via
+    /// `rateMove` and nulls `tier` for engine plies.
+    pub fn append(self: *GameAnalysis, m: MoveAnalysis) void {
+        if (self.count >= max_plies) return;
+        self.moves[self.count] = m;
+        self.count += 1;
+    }
+
+    /// Compute the player aggregates, key-moment ranking, and completeness marker from
+    /// the appended plies. Call once after the pass fills `moves[0..count]`.
+    pub fn finalize(self: *GameAnalysis) void {
+        const agg = aggregate(self.moves[0..self.count]);
+        self.blunders = agg.blunders;
+        self.inaccuracies = agg.inaccuracies;
+        self.accuracy = agg.accuracy;
+        self.key_moment_count = computeKeyMoments(self.moves[0..self.count], &self.key_moments);
+        self.version = current_version;
+        self.plies_covered = self.count;
+    }
+};
+
+/// Result of rating one played move.
+pub const RatedMove = struct { cpl: i32, tier: Tier };
+
+/// Rate a played move from the *mover's* perspective (works for either color — the
+/// negation flips the opponent-POV after-eval back to the mover).
+///   best_eval:  eval of the best line at the position BEFORE the move (mover POV).
+///   eval_after: eval of the position AFTER the move (opponent POV).
+pub fn rateMove(best_eval: Eval, eval_after: Eval) RatedMove {
+    const after_mover: i64 = -@as(i64, eval_after.toCp()); // flip opponent POV → mover POV
+    const loss: i64 = @as(i64, best_eval.toCp()) - after_mover;
+    const cpl: i32 = if (loss > 0) @intCast(@min(loss, std.math.maxInt(i32))) else 0;
+    const tier: Tier = if (cpl >= bad_threshold) .bad else if (cpl >= meh_threshold) .meh else .good;
+    return .{ .cpl = cpl, .tier = tier };
+}
+
+/// Synthesize the eval of a terminal position reached by the game-ending move. A
+/// terminal position has no legal reply, so the engine is never asked — the chess core
+/// reports how it ended. Returned from the terminal position's side-to-move POV (the
+/// side just checkmated or stalemated), matching `MoveAnalysis.eval`'s "opponent to
+/// move" convention. Checkmate → the side to move is mated now (maximal negative mate),
+/// so the delivering move rates `good` (cpl ≈ 0); any draw → dead equal (cp 0), so
+/// throwing a winning position into stalemate rates `bad`.
+pub fn synthesizeTerminalEval(terminal: *const chess.Board) Eval {
+    if (chess.isCheckmate(terminal)) return .{ .mate = -1 };
+    return .{ .cp = 0 };
+}
+
+pub const Aggregate = struct { blunders: u16, inaccuracies: u16, accuracy: ?f32 };
+
+/// lichess win-probability model: centipawns (mover POV) → win% in [0, 100].
+/// Saturates cleanly at mate magnitudes (exp under/overflow → 0/100, never NaN).
+fn winPercent(cp: i32) f64 {
+    const c: f64 = @floatFromInt(cp);
+    return 50.0 + 50.0 * (2.0 / (1.0 + @exp(-0.00368208 * c)) - 1.0);
+}
+
+/// lichess per-move accuracy% from the win% the move surrendered (both mover POV).
+fn moveAccuracy(win_before: f64, win_after: f64) f64 {
+    const drop = win_before - win_after; // ≥ 0 when the move loses win%
+    const a = 103.1668 * @exp(-0.04354 * drop) - 3.1669;
+    return std.math.clamp(a, 0.0, 100.0);
+}
+
+/// Player aggregates over the analyzed plies. Counts use `tier` (player plies only);
+/// accuracy is the harmonic mean of per-move accuracies, or null when no rated player
+/// move exists (guards the empty-set harmonic mean against NaN / divide-by-zero).
+pub fn aggregate(moves: []const MoveAnalysis) Aggregate {
+    var blunders: u16 = 0;
+    var inaccuracies: u16 = 0;
+    var inv_sum: f64 = 0; // Σ 1/accuracy_i
+    var rated: u32 = 0;
+    for (moves) |m| {
+        const tier = m.tier orelse continue; // player plies only
+        switch (tier) {
+            .bad => blunders += 1,
+            .meh => inaccuracies += 1,
+            .good => {},
+        }
+        const win_before = winPercent(m.best_eval.toCp());
+        const win_after = winPercent(-m.eval.toCp());
+        inv_sum += 1.0 / @max(moveAccuracy(win_before, win_after), 0.01);
+        rated += 1;
+    }
+    const accuracy: ?f32 = if (rated == 0)
+        null
+    else
+        @floatCast(@as(f64, @floatFromInt(rated)) / inv_sum);
+    return .{ .blunders = blunders, .inaccuracies = inaccuracies, .accuracy = accuracy };
+}
+
+/// Select the `max_key_moments` biggest-swing plies, returned in CHRONOLOGICAL order
+/// (ascending ply) so n/p navigation steps through the game forward; a mate-related
+/// swing is always among them. Returns the number of entries written.
+pub fn computeKeyMoments(moves: []const MoveAnalysis, out: *[max_key_moments]u16) u8 {
+    const n = moves.len;
+    var idx: [max_plies]u16 = undefined;
+    for (0..n) |i| idx[i] = @intCast(i);
+    // Rank by swing to pick the top-k...
+    std.sort.insertion(u16, idx[0..n], moves, struct {
+        fn lessThan(ctx: []const MoveAnalysis, a: u16, b: u16) bool {
+            return ctx[a].cpl > ctx[b].cpl; // descending by swing
+        }
+    }.lessThan);
+    const k: u8 = @intCast(@min(n, max_key_moments));
+    for (0..k) |i| out[i] = idx[i];
+    // ...then present them chronologically.
+    std.sort.insertion(u16, out[0..k], {}, struct {
+        fn lessThan(_: void, a: u16, b: u16) bool {
+            return a < b;
+        }
+    }.lessThan);
+    return k;
+}
+
+/// Assemble per-ply analysis from gathered engine evals (the pure core of the U4 pass —
+/// no engine, so it is unit-testable). `boards[i]` is the position before ply i;
+/// `best_evals[i]`/`bests[i]` are the engine's eval + best move there; `final_eval` is
+/// the eval of the position after the last ply (synthesized for a terminal board). A
+/// ply's after-eval is the next position's eval, or `final_eval` for the last ply. The
+/// tier is kept only on plies the player moved (`boards[i].active_color == player_color`).
+pub fn buildFromEvals(
+    out: *GameAnalysis,
+    boards: []const chess.Board,
+    best_evals: []const Eval,
+    bests: []const ?chess.Move,
+    final_eval: Eval,
+    player_color: chess.Color,
+) void {
+    out.* = .{};
+    const n = boards.len;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const after = if (i + 1 < n) best_evals[i + 1] else final_eval;
+        const rated = rateMove(best_evals[i], after);
+        out.append(.{
+            .eval = after,
+            .best = bests[i],
+            .best_eval = best_evals[i],
+            .cpl = rated.cpl,
+            .tier = if (boards[i].active_color == player_color) rated.tier else null,
+        });
+    }
+    out.finalize();
+}
+
+test "toCp: cp passes through" {
+    try std.testing.expectEqual(@as(i32, 35), (Eval{ .cp = 35 }).toCp());
+    try std.testing.expectEqual(@as(i32, -150), (Eval{ .cp = -150 }).toCp());
+    try std.testing.expectEqual(@as(i32, 0), (Eval{ .cp = 0 }).toCp());
+}
+
+test "toCp: mate dominates any realistic cp, sign preserved" {
+    try std.testing.expect((Eval{ .mate = 1 }).toCp() > 50_000);
+    try std.testing.expect((Eval{ .mate = -1 }).toCp() < -50_000);
+    // A mate outranks even a huge material advantage.
+    try std.testing.expect((Eval{ .mate = 5 }).toCp() > (Eval{ .cp = 9_000 }).toCp());
+}
+
+test "toCp: closer mate dominates farther mate" {
+    try std.testing.expect((Eval{ .mate = 1 }).toCp() > (Eval{ .mate = 5 }).toCp());
+    try std.testing.expect((Eval{ .mate = -1 }).toCp() < (Eval{ .mate = -5 }).toCp());
+}
+
+test "toCp: garbage mate distance does not overflow" {
+    // Defensive: a bogus huge mate value clamps instead of trapping.
+    _ = (Eval{ .mate = std.math.maxInt(i32) }).toCp();
+    _ = (Eval{ .mate = std.math.minInt(i32) }).toCp();
+}
+
+test "rateMove: tier thresholds good/meh/bad" {
+    // best_eval = cp N, eval_after = cp 0 (opponent POV) → cpl = N.
+    try std.testing.expectEqual(Tier.good, rateMove(.{ .cp = 0 }, .{ .cp = 0 }).tier); // cpl 0
+    try std.testing.expectEqual(Tier.good, rateMove(.{ .cp = 49 }, .{ .cp = 0 }).tier); // cpl 49
+    try std.testing.expectEqual(Tier.meh, rateMove(.{ .cp = 50 }, .{ .cp = 0 }).tier); // cpl 50
+    try std.testing.expectEqual(Tier.meh, rateMove(.{ .cp = 99 }, .{ .cp = 0 }).tier); // cpl 99
+    try std.testing.expectEqual(Tier.bad, rateMove(.{ .cp = 100 }, .{ .cp = 0 }).tier); // cpl 100
+    try std.testing.expectEqual(Tier.bad, rateMove(.{ .cp = 900 }, .{ .cp = 0 }).tier); // cpl 900
+    try std.testing.expectEqual(@as(i32, 900), rateMove(.{ .cp = 900 }, .{ .cp = 0 }).cpl);
+}
+
+test "rateMove: AE1 hung queen is bad" {
+    // Best held ~level; the move drops a queen → opponent now ~+900 → cpl ≈ 900 → bad.
+    const r = rateMove(.{ .cp = 0 }, .{ .cp = 900 });
+    try std.testing.expectEqual(Tier.bad, r.tier);
+    try std.testing.expectEqual(@as(i32, 900), r.cpl);
+}
+
+test "rateMove: AE6 perspective-correct for Black" {
+    // Black to move, best line +20 (Black POV). A sound move leaves White at -15
+    // (White POV) = Black still ~+15. cpl = 20 - 15 = 5 → good.
+    const r = rateMove(.{ .cp = 20 }, .{ .cp = -15 });
+    try std.testing.expectEqual(Tier.good, r.tier);
+    try std.testing.expectEqual(@as(i32, 5), r.cpl);
+}
+
+test "rateMove: AE4 missed forced mate is bad, not roughly even" {
+    // Best line mates in 2; player plays a quiet move leaving ~+50cp. Huge cpl → bad.
+    const r = rateMove(.{ .mate = 2 }, .{ .cp = -50 });
+    try std.testing.expectEqual(Tier.bad, r.tier);
+    try std.testing.expect(r.cpl > 10_000);
+}
+
+test "synthesizeTerminalEval: checkmate-delivering move rates good (R1)" {
+    // Fool's mate: Black has played Qh4#, White (side to move) is checkmated.
+    const mated = chess.Board.fromFen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3").?;
+    try std.testing.expect(chess.isCheckmate(&mated));
+    const after = synthesizeTerminalEval(&mated);
+    // The best line before the mating move was itself a mate → cpl ≈ 0 → good.
+    try std.testing.expectEqual(Tier.good, rateMove(.{ .mate = 1 }, after).tier);
+}
+
+test "synthesizeTerminalEval: stalemating a won position rates bad (R1)" {
+    // Black to move, no legal move, not in check → stalemate.
+    const stalemate = chess.Board.fromFen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1").?;
+    try std.testing.expect(chess.isStalemate(&stalemate));
+    const after = synthesizeTerminalEval(&stalemate); // cp 0 (draw)
+    // The player was completely winning; throwing it into stalemate is a big cpl → bad.
+    try std.testing.expectEqual(Tier.bad, rateMove(.{ .cp = 900 }, after).tier);
+}
+
+test "aggregate: counts player tiers, ignores engine plies" {
+    var ga = GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = -10 }, .best = null, .best_eval = .{ .cp = 10 }, .cpl = 0, .tier = .good });
+    ga.append(.{ .eval = .{ .cp = -10 }, .best = null, .best_eval = .{ .cp = 70 }, .cpl = 60, .tier = .meh });
+    ga.append(.{ .eval = .{ .cp = 200 }, .best = null, .best_eval = .{ .cp = 50 }, .cpl = 250, .tier = .bad });
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 0, .tier = null }); // engine
+    const agg = aggregate(ga.moves[0..ga.count]);
+    try std.testing.expectEqual(@as(u16, 1), agg.blunders);
+    try std.testing.expectEqual(@as(u16, 1), agg.inaccuracies);
+    try std.testing.expect(agg.accuracy != null);
+    try std.testing.expect(agg.accuracy.? >= 0 and agg.accuracy.? <= 100);
+}
+
+test "aggregate: zero rated player moves → accuracy null (no NaN)" {
+    var ga = GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 0, .tier = null });
+    const agg = aggregate(ga.moves[0..ga.count]);
+    try std.testing.expectEqual(@as(u16, 0), agg.blunders);
+    try std.testing.expectEqual(@as(u16, 0), agg.inaccuracies);
+    try std.testing.expectEqual(@as(?f32, null), agg.accuracy);
+}
+
+test "aggregate: accuracy decreases as cpl rises" {
+    var clean = GameAnalysis{};
+    clean.append(.{ .eval = .{ .cp = -20 }, .best = null, .best_eval = .{ .cp = 20 }, .cpl = 0, .tier = .good });
+    var sloppy = GameAnalysis{};
+    sloppy.append(.{ .eval = .{ .cp = 300 }, .best = null, .best_eval = .{ .cp = 50 }, .cpl = 350, .tier = .bad });
+    const a_clean = aggregate(clean.moves[0..clean.count]).accuracy.?;
+    const a_sloppy = aggregate(sloppy.moves[0..sloppy.count]).accuracy.?;
+    try std.testing.expect(a_clean > a_sloppy);
+}
+
+test "computeKeyMoments: keeps the top-5 swings, in chronological order" {
+    var ga = GameAnalysis{};
+    const cpls = [_]i32{ 10, 500, 99_000, 80, 5, 300, 20 }; // plies 0..6
+    for (cpls) |c| ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = c, .tier = .bad });
+    var out: [max_key_moments]u16 = undefined;
+    const k = computeKeyMoments(ga.moves[0..ga.count], &out);
+    // Top-5 swings = plies {1,2,3,5,6} (cpl 500,99000,80,300,20); plies 0 (10) and 4 (5) drop.
+    try std.testing.expectEqual(@as(u8, 5), k);
+    try std.testing.expectEqual(@as(u16, 1), out[0]);
+    try std.testing.expectEqual(@as(u16, 2), out[1]);
+    try std.testing.expectEqual(@as(u16, 3), out[2]);
+    try std.testing.expectEqual(@as(u16, 5), out[3]);
+    try std.testing.expectEqual(@as(u16, 6), out[4]);
+}
+
+test "computeKeyMoments: empty game returns zero" {
+    var ga = GameAnalysis{};
+    var out: [max_key_moments]u16 = undefined;
+    try std.testing.expectEqual(@as(u8, 0), computeKeyMoments(ga.moves[0..ga.count], &out));
+}
+
+test "GameAnalysis.finalize: fills aggregates, key moments, marker" {
+    var ga = GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = -10 }, .best = null, .best_eval = .{ .cp = 10 }, .cpl = 0, .tier = .good });
+    ga.append(.{ .eval = .{ .cp = 200 }, .best = null, .best_eval = .{ .cp = 50 }, .cpl = 250, .tier = .bad });
+    ga.finalize();
+    try std.testing.expectEqual(@as(u16, 1), ga.blunders);
+    try std.testing.expectEqual(@as(u16, 2), ga.plies_covered);
+    try std.testing.expectEqual(current_version, ga.version);
+    try std.testing.expectEqual(@as(u8, 2), ga.key_moment_count);
+    try std.testing.expectEqual(@as(u16, 0), ga.key_moments[0]); // chronological: earliest first
+}
+
+test "buildFromEvals: after-eval shifts, last ply uses final, engine plies untiered" {
+    // White is the player. Plies: 0 white (player), 1 black (engine), 2 white (player).
+    var boards: [3]chess.Board = undefined;
+    boards[0] = chess.Board.initial;
+    boards[1] = chess.makeMove(boards[0], chess.Move.fromUci("e2e4").?);
+    boards[2] = chess.makeMove(boards[1], chess.Move.fromUci("e7e5").?);
+    const best_evals = [_]Eval{ .{ .cp = 20 }, .{ .cp = -10 }, .{ .cp = 30 } };
+    const bests = [_]?chess.Move{ chess.Move.fromUci("e2e4"), chess.Move.fromUci("g8f6"), chess.Move.fromUci("d2d4") };
+    const final_eval = Eval{ .cp = -25 };
+
+    var ga = GameAnalysis{};
+    buildFromEvals(&ga, &boards, &best_evals, &bests, final_eval, .white);
+
+    try std.testing.expectEqual(@as(u16, 3), ga.count);
+    // ply 0 after-eval = best_evals[1]; last ply after-eval = final_eval.
+    try std.testing.expectEqual(Eval{ .cp = -10 }, ga.moves[0].eval);
+    try std.testing.expectEqual(Eval{ .cp = -25 }, ga.moves[2].eval);
+    // best_eval is the position-before eval, untouched by the shift.
+    try std.testing.expectEqual(Eval{ .cp = 30 }, ga.moves[2].best_eval);
+    // ply 1 is the engine's move (black to move there) → no tier.
+    try std.testing.expectEqual(@as(?Tier, null), ga.moves[1].tier);
+    try std.testing.expect(ga.moves[0].tier != null); // player plies are tiered
+    try std.testing.expect(ga.moves[2].tier != null);
+}
+
+test "buildFromEvals: Black player tiers only Black plies" {
+    var boards: [2]chess.Board = undefined;
+    boards[0] = chess.Board.initial; // white to move (ply 0 = engine when player is black)
+    boards[1] = chess.makeMove(boards[0], chess.Move.fromUci("e2e4").?); // black to move (ply 1 = player)
+    const best_evals = [_]Eval{ .{ .cp = 15 }, .{ .cp = -15 } };
+    const bests = [_]?chess.Move{ chess.Move.fromUci("d2d4"), chess.Move.fromUci("e7e5") };
+
+    var ga = GameAnalysis{};
+    buildFromEvals(&ga, &boards, &best_evals, &bests, .{ .cp = 10 }, .black);
+    try std.testing.expectEqual(@as(?Tier, null), ga.moves[0].tier); // white ply = engine
+    try std.testing.expect(ga.moves[1].tier != null); // black ply = player
+}

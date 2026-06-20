@@ -12,6 +12,7 @@ const PlayerColor = rozinante.tui.menu.PlayerColor;
 const HistoryScreen = rozinante.tui.history.HistoryScreen;
 const ViewerState = rozinante.tui.viewer.ViewerState;
 const engine_mod = rozinante.engine;
+const analysis_mod = rozinante.analysis;
 const openings = rozinante.openings;
 const persistence = rozinante.persistence;
 const pgn = persistence.pgn;
@@ -88,6 +89,7 @@ const Event = union(enum) {
     cap_multi_cursor,
     engine_move_ready,
     engine_analysis_ready,
+    analysis_pass_ready,
 };
 
 const EngineResult = struct {
@@ -211,6 +213,162 @@ fn cancelAnalysis(
     analysis_pending.* = false;
 }
 
+/// Background post-game analysis pass (U4): full-strength eval of every position the
+/// game reached, building a `GameAnalysis`. Runs as an `io.concurrent` task; checks an
+/// atomic cancel flag between positions and posts exactly one `.analysis_pass_ready`
+/// on completion (or failure). `boards` = the position before each ply; `final_board`
+/// = the position after the last ply.
+fn analysisPassWork(
+    eng: *engine_mod.Engine,
+    boards: []const chess.Board,
+    final_board: *const chess.Board,
+    player_color: chess.Color,
+    out: *analysis_mod.GameAnalysis,
+    cancel: *std.atomic.Value(bool),
+    failed: *bool,
+    loop_ptr: *vaxis.Loop(Event),
+) void {
+    const n = boards.len;
+    out.* = .{};
+
+    // 1. Full-strength eval of every pre-move position. Cancel cooperatively between
+    //    positions — a stop() write would race the per-position UCI writes.
+    var evals: [analysis_mod.max_plies]analysis_mod.Eval = undefined;
+    var bests: [analysis_mod.max_plies]?chess.Move = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (cancel.load(.acquire)) return;
+        const res = eng.analyzeFullStrength(&boards[i], 500) catch {
+            failed.* = true;
+            loop_ptr.postEvent(.analysis_pass_ready) catch {};
+            return;
+        };
+        evals[i] = res.eval;
+        bests[i] = res.best_move;
+    }
+
+    // 2. After-eval of the final ply: synthesized for a terminal board (no legal reply),
+    //    a real eval for a resignation (the final board is an ordinary position).
+    const is_terminal = chess.isCheckmate(final_board) or chess.isDraw(final_board);
+    const final_eval: analysis_mod.Eval = if (is_terminal)
+        analysis_mod.synthesizeTerminalEval(final_board)
+    else fe: {
+        if (cancel.load(.acquire)) return;
+        const res = eng.analyzeFullStrength(final_board, 500) catch {
+            failed.* = true;
+            loop_ptr.postEvent(.analysis_pass_ready) catch {};
+            return;
+        };
+        break :fe res.eval;
+    };
+
+    // 3. Per-ply tiers + aggregates + key moments (pure, unit-tested in analysis.zig).
+    analysis_mod.buildFromEvals(out, boards, evals[0..n], bests[0..n], final_eval, player_color);
+    loop_ptr.postEvent(.analysis_pass_ready) catch {};
+}
+
+/// Dispatch the background pass over the just-ended game. No-op if one is already
+/// running; a zero-move game (resigned before moving) yields an empty ready analysis.
+fn dispatchAnalysisPass(
+    io: Io,
+    eng: *engine_mod.Engine,
+    game_state: *Game,
+    player_color: chess.Color,
+    pass_future: *?Io.Future(void),
+    pass_cancel: *std.atomic.Value(bool),
+    pass_failed: *bool,
+    pass_active: *bool,
+    loop_ptr: *vaxis.Loop(Event),
+) void {
+    if (pass_active.*) return;
+    if (game_state.move_count == 0) {
+        game_state.analysis = .{};
+        game_state.analysis.finalize();
+        game_state.analysis_state = .ready;
+        return;
+    }
+    pass_cancel.store(false, .monotonic);
+    pass_failed.* = false;
+    pass_active.* = true;
+    game_state.analysis_state = .pending;
+    pass_future.* = io.concurrent(analysisPassWork, .{
+        eng,
+        game_state.board_history[0..game_state.move_count],
+        &game_state.board,
+        player_color,
+        &game_state.analysis,
+        pass_cancel,
+        pass_failed,
+        loop_ptr,
+    }) catch {
+        pass_active.* = false;
+        game_state.analysis_state = .failed;
+        return;
+    };
+}
+
+/// Cooperatively cancel a running pass: set the flag and await the task (the worker
+/// finishes its current ≤500 ms analyze, sees the flag, returns). NOT `eng.stop()` —
+/// that write would race the worker's per-position UCI writes on the shared writer.
+fn cancelAnalysisPass(
+    io: Io,
+    pass_future: *?Io.Future(void),
+    pass_cancel: *std.atomic.Value(bool),
+    pass_active: *bool,
+) void {
+    if (!pass_active.*) return;
+    pass_cancel.store(true, .release);
+    if (pass_future.*) |*f| {
+        f.await(io);
+        pass_future.* = null;
+    }
+    pass_active.* = false;
+}
+
+/// Serialize an analyzed game into PGN and atomically overwrite `path` in place (U3).
+fn serializeAndWriteBack(
+    io: Io,
+    path: []const u8,
+    header: pgn.PgnHeader,
+    records: []const game_mod.MoveRecord,
+    board_history: []const chess.Board,
+    ga: *const analysis_mod.GameAnalysis,
+) void {
+    var buf: [64 * 1024]u8 = undefined;
+    const content = pgn.writePgn(&buf, header, records, board_history, ga) catch {
+        log.warn("failed to serialize analyzed PGN", .{});
+        return;
+    };
+    storage.writeAnalyzedPgn(io, path, content) catch |err| {
+        log.warn("failed to write back analysis: {}", .{err});
+    };
+}
+
+/// Serialize the analyzed game and atomically overwrite its saved file in place (U3).
+fn writeBackAnalysis(
+    io: Io,
+    game_state: *Game,
+    path: []const u8,
+    player_color: chess.Color,
+    game_start_secs: i64,
+) void {
+    // writePgn needs board_history[move_count] to hold the final board (mirrors autoSave).
+    if (game_state.board_count < game_state.board_history.len) {
+        game_state.board_history[game_state.board_count] = game_state.board;
+    }
+    var date_buf: [16]u8 = undefined;
+    const header = pgn.PgnHeader{
+        .event = "Rozinante",
+        .site = "Local",
+        .date = formatPgnDate(&date_buf, game_start_secs),
+        .round = "-",
+        .white = if (player_color == .white) "Player" else "Stockfish",
+        .black = if (player_color == .black) "Player" else "Stockfish",
+        .result = pgnResult(game_state),
+    };
+    serializeAndWriteBack(io, path, header, game_state.move_history[0..game_state.move_count], game_state.board_history[0 .. game_state.board_count + 1], &game_state.analysis);
+}
+
 fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
     const win = vx.window();
     win.clear();
@@ -313,6 +471,7 @@ fn autoSave(
         header,
         game_state.move_history[0..game_state.move_count],
         game_state.board_history[0 .. game_state.board_count + 1],
+        null,
     ) catch {
         log.warn("failed to serialize PGN for auto-save", .{});
         return;
@@ -358,6 +517,7 @@ fn runGameHistory(
     history_games: *std.ArrayList(storage.GameInfo),
     data_dir: []const u8,
     selected_filepath: *?[]const u8,
+    stockfish_path: ?[]const u8,
 ) HistoryResult {
     var screen = HistoryScreen.init(history_games.*);
 
@@ -375,7 +535,7 @@ fn runGameHistory(
                     .select_finished => {
                         if (screen.selectedGame()) |g| {
                             selected_filepath.* = std.fmt.allocPrint(alloc, "{s}/{s}", .{ data_dir, g.filename }) catch null;
-                            const viewer_result = runGameViewer(io, alloc, loop_ptr, vx, tty, selected_filepath.*);
+                            const viewer_result = runGameViewer(io, alloc, loop_ptr, vx, tty, selected_filepath.*, stockfish_path, false);
                             if (viewer_result == .back_to_menu) return .back;
                         }
                     },
@@ -409,6 +569,35 @@ const ViewerResult = enum {
     back_to_menu,
 };
 
+/// Which color the human played, from the PGN tags (`autoSave` writes "Player" to one
+/// side). Defaults to White for a foreign game where neither side is tagged "Player".
+fn viewerPlayerColor(parsed: *const pgn.ParsedGame) chess.Color {
+    if (parsed.white) |w| if (std.mem.eql(u8, w, "Player")) return .white;
+    if (parsed.black) |b| if (std.mem.eql(u8, b, "Player")) return .black;
+    return .white;
+}
+
+/// Cache a freshly backfilled analysis into the opened file, preserving its tags (U3).
+fn writeBackViewerAnalysis(
+    io: Io,
+    path: []const u8,
+    parsed: *const pgn.ParsedGame,
+    records: []const game_mod.MoveRecord,
+    board_history: []const chess.Board,
+    ga: *const analysis_mod.GameAnalysis,
+) void {
+    const header = pgn.PgnHeader{
+        .event = parsed.event orelse "Rozinante",
+        .site = parsed.site orelse "Local",
+        .date = parsed.date orelse "????.??.??",
+        .round = parsed.round orelse "-",
+        .white = parsed.white orelse "?",
+        .black = parsed.black orelse "?",
+        .result = parsed.result orelse "*",
+    };
+    serializeAndWriteBack(io, path, header, records, board_history, ga);
+}
+
 fn runGameViewer(
     io: Io,
     alloc: std.mem.Allocator,
@@ -416,6 +605,8 @@ fn runGameViewer(
     vx: *vaxis.Vaxis,
     tty: *vaxis.Tty,
     filepath: ?[]const u8,
+    stockfish_path: ?[]const u8,
+    start_at_worst: bool,
 ) ViewerResult {
     const fp = filepath orelse return .back_to_history;
     const pgn_content = storage.loadGame(alloc, io, fp) catch return .back_to_history;
@@ -426,14 +617,63 @@ fn runGameViewer(
     var boards: [513]chess.Board = undefined;
     boards[0] = chess.Board.initial;
     var san_list: [512]pgn.SanNotation = undefined;
+    var records: [512]game_mod.MoveRecord = undefined;
     for (0..move_count) |i| {
         const pm = parsed.moves[i];
-        const record = game_mod.MoveRecord{ .move = pm.move, .piece = pm.piece, .captured = pm.captured };
+        records[i] = .{ .move = pm.move, .piece = pm.piece, .captured = pm.captured };
         boards[i + 1] = chess.makeMove(boards[i], pm.move);
-        san_list[i] = pgn.computeSan(record, &boards[i], &boards[i + 1]);
+        san_list[i] = pgn.computeSan(records[i], &boards[i], &boards[i + 1]);
     }
 
     var viewer = ViewerState.init(&boards, &san_list, move_count);
+    viewer.player_color = viewerPlayerColor(&parsed);
+
+    // --- Analysis: cached if present, else backfill via a provisioned engine (U5) ---
+    var pass_future: ?Io.Future(void) = null;
+    var pass_cancel = std.atomic.Value(bool).init(false);
+    var pass_active: bool = false;
+    var pass_failed: bool = false;
+    var review_engine: ?engine_mod.Engine = null;
+    var analysis_storage: analysis_mod.GameAnalysis = undefined;
+    defer {
+        // Cancel-and-await the backfill before this frame's boards/analysis_storage pop
+        // (the worker reads them), then release the engine. Covers EVERY return below,
+        // including the `catch return` exits. Resize does not return, so it never cancels.
+        cancelAnalysisPass(io, &pass_future, &pass_cancel, &pass_active);
+        if (review_engine) |*e| e.deinit();
+    }
+
+    if (pgn.assembleAnalysis(&parsed, boards[0..move_count])) |cached| {
+        analysis_storage = cached;
+        viewer.analysis = &analysis_storage;
+        viewer.analysis_state = .ready;
+        if (start_at_worst) viewer.jumpToWorstMove();
+    } else if (stockfish_path) |sp| {
+        review_engine = engine_mod.Engine.init(io, sp, 20) catch null;
+        if (review_engine) |*e| {
+            e.relocate();
+            pass_active = true;
+            viewer.analysis_state = .analyzing;
+            pass_future = io.concurrent(analysisPassWork, .{
+                e,
+                boards[0..move_count],
+                &boards[move_count],
+                viewerPlayerColor(&parsed),
+                &analysis_storage,
+                &pass_cancel,
+                &pass_failed,
+                loop_ptr,
+            }) catch blk: {
+                pass_active = false;
+                viewer.analysis_state = .unavailable;
+                break :blk null;
+            };
+        } else {
+            viewer.analysis_state = .unavailable; // Stockfish present but failed to start (R7)
+        }
+    } else {
+        viewer.analysis_state = .unavailable; // no Stockfish (R7)
+    }
 
     while (true) {
         const win = vx.window();
@@ -447,6 +687,23 @@ fn runGameViewer(
                 switch (action) {
                     .back => return .back_to_history,
                     .none => {},
+                }
+            },
+            .analysis_pass_ready => {
+                if (pass_future) |*f| {
+                    f.await(io);
+                    pass_future = null;
+                }
+                pass_active = false;
+                if (!pass_failed) {
+                    viewer.analysis = &analysis_storage;
+                    viewer.analysis_state = .ready;
+                    if (start_at_worst) viewer.jumpToWorstMove();
+                    if (filepath) |path| {
+                        writeBackViewerAnalysis(io, path, &parsed, records[0..move_count], boards[0 .. move_count + 1], &analysis_storage);
+                    }
+                } else {
+                    viewer.analysis_state = .unavailable;
                 }
             },
             .winsize => |ws| {
@@ -529,6 +786,14 @@ pub fn main(init: std.process.Init) !void {
     var analysis_result: EngineResult = .{};
     var analysis_board: chess.Board = undefined;
     var analysis_pending: bool = false;
+    var pass_future: ?Io.Future(void) = null;
+    var pass_cancel = std.atomic.Value(bool).init(false);
+    var pass_failed: bool = false;
+    var pass_active: bool = false;
+    // Cancel-await any in-flight post-game pass before main() unwinds (LIFO: runs
+    // before the current_engine deinit defer), so a terminal-IO error return can't
+    // orphan the worker reading a killed engine / freed game_state.
+    defer cancelAnalysisPass(io, &pass_future, &pass_cancel, &pass_active);
 
     const opening_book = try alloc.create(openings.OpeningBook);
     opening_book.* = openings.OpeningBook.init();
@@ -604,7 +869,7 @@ pub fn main(init: std.process.Init) !void {
                             else |_|
                                 std.ArrayList(storage.GameInfo).empty;
                             var selected_fp: ?[]const u8 = null;
-                            const hist_result = runGameHistory(io, alloc, &loop, &vx, &tty, &history_list, dd, &selected_fp);
+                            const hist_result = runGameHistory(io, alloc, &loop, &vx, &tty, &history_list, dd, &selected_fp, stockfish_path);
                             if (hist_result == .resume_game) {
                                 if (selected_fp) |fp| {
                                     // Parse the selected game to extract elo and color for resume
@@ -656,6 +921,7 @@ pub fn main(init: std.process.Init) !void {
         if (current_engine) |*eng| {
             cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
         }
+        cancelAnalysisPass(io, &pass_future, &pass_cancel, &pass_active);
         cancelEngineFuture(&engine_future, io);
         if (current_engine) |*eng| {
             eng.deinit();
@@ -733,11 +999,12 @@ pub fn main(init: std.process.Init) !void {
 
         // --- Game phase ---
         var prev_move_count: usize = game_state.move_count;
+        var prev_phase: game_mod.GamePhase = game_state.game_phase;
         renderGame(&vx, &game_state);
         try vx.render(tty.writer());
 
         game_loop: while (true) {
-            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting or analysis_pending)
+            const event = if (game_state.engine_state == .thinking or game_state.engine_state == .reconnecting or analysis_pending or pass_active)
                 loop.tryEvent() catch null
             else
                 loop.nextEvent() catch null;
@@ -756,6 +1023,7 @@ pub fn main(init: std.process.Init) !void {
                                     cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
                                 }
                                 cancelEngineFuture(&engine_future, io);
+                                cancelAnalysisPass(io, &pass_future, &pass_cancel, &pass_active);
                                 return;
                             },
                             .new_game => {
@@ -763,6 +1031,7 @@ pub fn main(init: std.process.Init) !void {
                                     cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
                                 }
                                 cancelEngineFuture(&engine_future, io);
+                                cancelAnalysisPass(io, &pass_future, &pass_cancel, &pass_active);
                                 game_state.engine_state = .idle;
                                 continue :main_loop;
                             },
@@ -780,7 +1049,6 @@ pub fn main(init: std.process.Init) !void {
                                         "Black resigns \u{2014} White wins";
 
                                     if (data_dir) |dd| autoSave(io, alloc, &game_state, dd, &current_save_path, game_elo, player_color, game_start_secs);
-                                    continue :main_loop;
                                 }
                             },
                             .toggle_hints => {
@@ -821,6 +1089,13 @@ pub fn main(init: std.process.Init) !void {
                                     }
                                     log.debug("dispatching engine move (engine turn, idle)", .{});
                                     dispatchEngineMove(io, &current_engine.?, &game_state, &engine_board, &engine_result, &engine_future, &loop);
+                                }
+                            },
+                            .review => {
+                                if (game_state.analysis_state == .ready) {
+                                    if (current_save_path) |path| {
+                                        _ = runGameViewer(io, alloc, &loop, &vx, &tty, path, stockfish_path, true);
+                                    }
                                 }
                             },
                             .none => {},
@@ -891,6 +1166,23 @@ pub fn main(init: std.process.Init) !void {
                         }
                         analysis_result = .{};
                     },
+                    .analysis_pass_ready => {
+                        if (pass_future) |*f| {
+                            f.await(io);
+                            pass_future = null;
+                        }
+                        if (pass_active) {
+                            pass_active = false;
+                            if (pass_failed) {
+                                game_state.analysis_state = .failed;
+                            } else {
+                                game_state.analysis_state = .ready;
+                                if (current_save_path) |path| {
+                                    writeBackAnalysis(io, &game_state, path, player_color, game_start_secs);
+                                }
+                            }
+                        }
+                    },
                     .winsize => |ws| {
                         try vx.resize(alloc, tty.writer(), ws);
                     },
@@ -915,6 +1207,17 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             }
+
+            // Dispatch the post-game analysis pass once, on the playing→ended transition.
+            // Covers checkmate/draw from the player (.key_press) or the engine
+            // (.engine_move_ready) and resignation (which now dwells here, not restarts).
+            if (prev_phase == .playing and game_state.game_phase == .ended) {
+                if (current_engine) |*eng| {
+                    cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
+                    dispatchAnalysisPass(io, eng, &game_state, player_color, &pass_future, &pass_cancel, &pass_failed, &pass_active, &loop);
+                }
+            }
+            prev_phase = game_state.game_phase;
 
             // Update thinking timer for display
             if (game_state.engine_state == .thinking) {

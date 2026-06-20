@@ -86,6 +86,15 @@ pub const HistoryScreen = struct {
         const title_x = x0 + (content_w -| 12) / 2;
         _ = renderer.writeStr(win, title_x, y, title, .{ .fg = Theme.highlight_cursor, .bg = Theme.bg });
         y += 2;
+        if (computeTrend(self.games.items)) |trend| {
+            const txt = switch (trend) {
+                .improving => "\xe2\x86\x93 fewer mistakes lately",
+                .worsening => "\xe2\x86\x91 more mistakes lately",
+                .flat => "\xe2\x86\x92 steady",
+            };
+            _ = renderer.writeStr(win, x0 + 2, y, txt, .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            y += 2;
+        }
 
         if (total == 0) {
             _ = renderer.writeStr(win, x0 + 2, y, "No saved games", .{ .fg = Theme.text_dim, .bg = Theme.bg });
@@ -99,6 +108,8 @@ pub const HistoryScreen = struct {
             _ = renderer.writeStr(win, x0 + 13, y, "Elo", .{ .fg = Theme.text_dim, .bg = Theme.bg });
             _ = renderer.writeStr(win, x0 + 19, y, "Color", .{ .fg = Theme.text_dim, .bg = Theme.bg });
             _ = renderer.writeStr(win, x0 + 27, y, "Result", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            _ = renderer.writeStr(win, x0 + 40, y, "Miss", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            _ = renderer.writeStr(win, x0 + 47, y, "Acc", .{ .fg = Theme.text_dim, .bg = Theme.bg });
             y += 1;
 
             const sep = "\xe2\x94\x80" ** 12;
@@ -132,6 +143,18 @@ pub const HistoryScreen = struct {
                 _ = renderer.writeNum(win, x0 + 13, y, g.elo, style);
                 _ = renderer.writeStr(win, x0 + 19, y, g.player_color, style);
                 _ = renderer.writeStr(win, x0 + 27, y, displayResult(g.result, g.player_color), style);
+                if (g.blunders) |b| {
+                    _ = renderer.writeNum(win, x0 + 40, y, b, style);
+                } else {
+                    _ = renderer.writeStr(win, x0 + 40, y, "\xe2\x80\x94", style);
+                }
+                if (g.accuracy) |a| {
+                    const pct: u16 = @intFromFloat(@round(std.math.clamp(a, 0, 100)));
+                    const c = renderer.writeNum(win, x0 + 47, y, pct, style);
+                    _ = renderer.writeStr(win, c, y, "%", style);
+                } else {
+                    _ = renderer.writeStr(win, x0 + 47, y, "\xe2\x80\x94", style);
+                }
                 y += 1;
             }
         }
@@ -148,6 +171,34 @@ pub const HistoryScreen = struct {
         }
     }
 };
+
+const Trend = enum { improving, flat, worsening };
+
+/// Direction of the player's recent mistake counts across analyzed games (newest
+/// first), null below 2 analyzed games. Compares the newer half's average mistake
+/// count to the older half's, with 0.5 hysteresis so it does not flap (R13).
+fn computeTrend(games: []const storage.GameInfo) ?Trend {
+    var counts: [6]u16 = undefined;
+    var n: usize = 0;
+    for (games) |g| {
+        if (g.blunders) |b| {
+            counts[n] = b;
+            n += 1;
+            if (n == counts.len) break;
+        }
+    }
+    if (n < 2) return null;
+    const half = n / 2;
+    var newer_sum: u32 = 0;
+    var older_sum: u32 = 0;
+    for (0..half) |i| newer_sum += counts[i];
+    for (half..n) |i| older_sum += counts[i];
+    const newer_avg = @as(f32, @floatFromInt(newer_sum)) / @as(f32, @floatFromInt(half));
+    const older_avg = @as(f32, @floatFromInt(older_sum)) / @as(f32, @floatFromInt(n - half));
+    if (newer_avg + 0.5 < older_avg) return .improving;
+    if (newer_avg > older_avg + 0.5) return .worsening;
+    return .flat;
+}
 
 fn displayResult(result: []const u8, player_color: []const u8) []const u8 {
     if (std.mem.eql(u8, result, "*")) return "In Progress";
@@ -199,4 +250,31 @@ test "history: delete asks first, confirms on Y, cancels on Esc (AE7/R8)" {
     // Del then Y confirms.
     _ = screen.handleInput(fakeKey(vaxis.Key.delete, .{}));
     try std.testing.expectEqual(HistoryAction.delete, screen.handleInput(fakeKey(vaxis.Key.enter, .{})));
+}
+
+fn gameWithBlunders(b: ?u16) storage.GameInfo {
+    return .{
+        .filename = "g.pgn",
+        .date = "2026-06-18",
+        .elo = 1500,
+        .player_color = "white",
+        .result = "1-0",
+        .is_finished = true,
+        .blunders = b,
+    };
+}
+
+test "computeTrend: improving when recent mistakes drop" {
+    const games = [_]storage.GameInfo{ gameWithBlunders(1), gameWithBlunders(1), gameWithBlunders(4), gameWithBlunders(5) };
+    try std.testing.expectEqual(Trend.improving, computeTrend(&games).?);
+}
+
+test "computeTrend: worsening when recent mistakes rise" {
+    const games = [_]storage.GameInfo{ gameWithBlunders(5), gameWithBlunders(4), gameWithBlunders(1), gameWithBlunders(1) };
+    try std.testing.expectEqual(Trend.worsening, computeTrend(&games).?);
+}
+
+test "computeTrend: null below two analyzed games" {
+    const games = [_]storage.GameInfo{ gameWithBlunders(null), gameWithBlunders(3) };
+    try std.testing.expectEqual(@as(?Trend, null), computeTrend(&games));
 }

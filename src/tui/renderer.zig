@@ -7,6 +7,7 @@ const chess = @import("../chess.zig");
 const game_mod = @import("game.zig");
 const Game = game_mod.Game;
 const sprites = @import("sprites.zig");
+const analysis = @import("../analysis.zig");
 
 pub const Palette = struct {
     bg: Color,
@@ -26,6 +27,9 @@ pub const Palette = struct {
     highlight_endangered: Color,
     highlight_hint_best: Color,
     selection_bg: Color,
+    eval_good: Color,
+    eval_meh: Color,
+    eval_bad: Color,
 };
 
 pub const ThemeId = enum {
@@ -88,6 +92,9 @@ fn paletteOf(bg: [3]u8, dark: [3]u8, light: [3]u8, wp: [3]u8, bp: [3]u8, tp: [3]
         .highlight_endangered = rgb(.{ 255, 100, 50 }),
         .highlight_hint_best = rgb(.{ 50, 200, 100 }),
         .selection_bg = rgb(sel),
+        .eval_good = rgb(.{ 80, 210, 120 }),
+        .eval_meh = rgb(.{ 230, 190, 70 }),
+        .eval_bad = rgb(.{ 235, 85, 85 }),
     };
 }
 
@@ -102,6 +109,25 @@ pub fn palette(id: ThemeId) Palette {
 }
 
 pub var Theme: Palette = palette(.classic);
+
+/// One-character move-quality glyph — three DISTINCT shapes (not color alone), so the
+/// rating survives a colorblind reader and any theme. `tierColor` is the reinforcing
+/// (theme-invariant) color.
+pub fn tierGlyph(tier: analysis.Tier) []const u8 {
+    return switch (tier) {
+        .good => "\u{2713}", // ✓
+        .meh => "?",
+        .bad => "\u{2717}", // ✗
+    };
+}
+
+pub fn tierColor(tier: analysis.Tier) Color {
+    return switch (tier) {
+        .good => Theme.eval_good,
+        .meh => Theme.eval_meh,
+        .bad => Theme.eval_bad,
+    };
+}
 
 // drawMarks is hand-fitted to exactly this cell geometry; the RenderOptions
 // defaults and the drawMarks guard both reference it so they cannot drift apart.
@@ -515,6 +541,72 @@ fn renderPromotionStatus(win: Window, x: u16, y: u16, pp: game_mod.PromotionPend
     }
 }
 
+/// Game-end summary card (U7): led by mistake/inaccuracy counts, worst moves, and a
+/// secondary accuracy figure, with a review hint. Replaces the captured/opening/
+/// move-history panel content on the ended screen. Shows pending/failed states while
+/// the background pass runs or after it fails.
+fn renderSummaryCard(win: Window, game: *const Game, y_in: u16) void {
+    var y = y_in;
+    switch (game.analysis_state) {
+        .none => return,
+        .pending => {
+            _ = writeStr(win, 1, y, "Analyzing\u{2026}", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            return;
+        },
+        .failed => {
+            _ = writeStr(win, 1, y, "Analysis unavailable", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            return;
+        },
+        .ready => {},
+    }
+    const ga = &game.analysis;
+
+    y += 1;
+    _ = writeStr(win, 1, y, "REVIEW", .{ .fg = Theme.text_primary, .bg = Theme.bg });
+    y += 1;
+
+    // Counts lead (R8).
+    var col = writeStr(win, 1, y, "Mistakes ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    _ = writeNum(win, col, y, ga.blunders, .{ .fg = Theme.eval_bad, .bg = Theme.bg });
+    y += 1;
+    col = writeStr(win, 1, y, "Inaccurate ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    _ = writeNum(win, col, y, ga.inaccuracies, .{ .fg = Theme.eval_meh, .bg = Theme.bg });
+    y += 1;
+
+    // Accuracy is secondary; "\u{2014}" (em dash) when the player made no rated move.
+    col = writeStr(win, 1, y, "Accuracy ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    if (ga.accuracy) |acc| {
+        const pct: u16 = @intFromFloat(@round(std.math.clamp(acc, 0, 100)));
+        col = writeNum(win, col, y, pct, .{ .fg = Theme.text_primary, .bg = Theme.bg });
+        _ = writeStr(win, col, y, "%", .{ .fg = Theme.text_primary, .bg = Theme.bg });
+    } else {
+        _ = writeStr(win, col, y, "\u{2014}", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    }
+    y += 2;
+
+    _ = writeStr(win, 1, y, "Worst moves", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+    y += 1;
+    var shown: u8 = 0;
+    var ki: usize = 0;
+    while (ki < ga.key_moment_count and shown < 3) : (ki += 1) {
+        const ply = ga.key_moments[ki];
+        if (ply >= ga.count) continue;
+        const t = ga.moves[ply].tier orelse continue;
+        if (t != .bad) continue; // player mistakes/blunders only
+        const move_num: u16 = @intCast(ply / 2 + 1);
+        var c = writeNum(win, 1, y, move_num, .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        c = writeStr(win, c, y, if (ply % 2 == 0) ". " else "\u{2026} ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        if (ply < game.move_count) {
+            _ = writeStr(win, c, y, game.fan_history[ply].slice(), .{ .fg = Theme.eval_bad, .bg = Theme.bg });
+        }
+        y += 1;
+        shown += 1;
+    }
+    if (shown == 0) {
+        _ = writeStr(win, 1, y, "None \u{2014} clean game!", .{ .fg = Theme.eval_good, .bg = Theme.bg });
+    }
+}
+
 pub fn renderInfoPanel(win: Window, game: *const Game) void {
     win.fill(.{ .style = .{ .bg = Theme.bg } });
 
@@ -545,6 +637,10 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
             _ = writeStr(win, 1, y, result, .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         }
         y += 1;
+        renderSummaryCard(win, game, y);
+        const hint_y = win.height -| 2;
+        _ = writeStr(win, 1, hint_y, "R Review  N Menu  Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+        return;
     } else if (game.engine_state == .thinking) {
         const spinners = [_][]const u8{ "|", "/", "-", "\\" };
         var col = writeStr(win, 1, y, spinners[game.spinner_idx], .{ .fg = Theme.highlight_cursor, .bg = Theme.bg });
@@ -878,4 +974,65 @@ test "ThemeId fromString/toString round-trip; unknown -> classic (AE10)" {
         try testing.expectEqual(id, ThemeId.fromString(id.toString()));
     }
     try testing.expectEqual(ThemeId.classic, ThemeId.fromString("nonsense"));
+}
+
+// Renders the panel to an offline screen and flattens it to text. Catches the class of
+// bug where writeStr stores a slice into a caller buffer that dies before vx.render
+// flushes (cells hold slices into `text`, not copies) — only static/long-lived strings
+// survive, so a value formatted into a render-local buffer renders blank.
+fn renderPanelToText(buf: []u8, game: *const Game, w: u16) []const u8 {
+    var screen = vaxis.Screen.init(testing.allocator, .{ .rows = 40, .cols = w, .x_pixel = 0, .y_pixel = 0 }) catch return "";
+    defer screen.deinit(testing.allocator);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = w, .height = 40, .screen = &screen };
+    renderInfoPanel(win, game);
+    var n: usize = 0;
+    for (0..40) |r| {
+        for (0..w) |c| {
+            const cell = screen.readCell(@intCast(c), @intCast(r)) orelse continue;
+            const gph = cell.char.grapheme;
+            if (gph.len == 0) continue;
+            for (gph) |ch| if (n < buf.len) {
+                buf[n] = ch;
+                n += 1;
+            };
+        }
+        if (n < buf.len) {
+            buf[n] = '\n';
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+test "summary card paints the accuracy value (not a dangling slice)" {
+    var game = Game.init();
+    game.game_phase = .ended;
+    game.result = "0-1";
+    game.move_count = 28;
+    game.analysis_state = .ready;
+    game.analysis.count = 28;
+    game.analysis.blunders = 0;
+    game.analysis.inaccuracies = 0;
+    game.analysis.accuracy = 99.9;
+
+    var buf: [4096]u8 = undefined;
+    const text = renderPanelToText(&buf, &game, 30);
+    try testing.expect(std.mem.indexOf(u8, text, "Accuracy") != null);
+    // 99.9 rounds to 100; the value must actually paint (the dangling-slice bug left it blank).
+    try testing.expect(std.mem.indexOf(u8, text, "100%") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Mistakes") != null);
+}
+
+test "summary card shows em dash when accuracy is null (no rated move)" {
+    var game = Game.init();
+    game.game_phase = .ended;
+    game.result = "1-0";
+    game.move_count = 0;
+    game.analysis_state = .ready;
+    game.analysis.accuracy = null;
+
+    var buf: [4096]u8 = undefined;
+    const text = renderPanelToText(&buf, &game, 30);
+    try testing.expect(std.mem.indexOf(u8, text, "Accuracy") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\u{2014}") != null);
 }
