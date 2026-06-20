@@ -325,6 +325,25 @@ fn cancelAnalysisPass(
     pass_active.* = false;
 }
 
+/// Serialize an analyzed game into PGN and atomically overwrite `path` in place (U3).
+fn serializeAndWriteBack(
+    io: Io,
+    path: []const u8,
+    header: pgn.PgnHeader,
+    records: []const game_mod.MoveRecord,
+    board_history: []const chess.Board,
+    ga: *const analysis_mod.GameAnalysis,
+) void {
+    var buf: [64 * 1024]u8 = undefined;
+    const content = pgn.writePgn(&buf, header, records, board_history, ga) catch {
+        log.warn("failed to serialize analyzed PGN", .{});
+        return;
+    };
+    storage.writeAnalyzedPgn(io, path, content) catch |err| {
+        log.warn("failed to write back analysis: {}", .{err});
+    };
+}
+
 /// Serialize the analyzed game and atomically overwrite its saved file in place (U3).
 fn writeBackAnalysis(
     io: Io,
@@ -347,20 +366,7 @@ fn writeBackAnalysis(
         .black = if (player_color == .black) "Player" else "Stockfish",
         .result = pgnResult(game_state),
     };
-    var buf: [64 * 1024]u8 = undefined;
-    const content = pgn.writePgn(
-        &buf,
-        header,
-        game_state.move_history[0..game_state.move_count],
-        game_state.board_history[0 .. game_state.board_count + 1],
-        &game_state.analysis,
-    ) catch {
-        log.warn("failed to serialize analyzed PGN", .{});
-        return;
-    };
-    storage.writeAnalyzedPgn(io, path, content) catch |err| {
-        log.warn("failed to write back analysis: {}", .{err});
-    };
+    serializeAndWriteBack(io, path, header, game_state.move_history[0..game_state.move_count], game_state.board_history[0 .. game_state.board_count + 1], &game_state.analysis);
 }
 
 fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
@@ -589,14 +595,7 @@ fn writeBackViewerAnalysis(
         .black = parsed.black orelse "?",
         .result = parsed.result orelse "*",
     };
-    var buf: [64 * 1024]u8 = undefined;
-    const content = pgn.writePgn(&buf, header, records, board_history, ga) catch {
-        log.warn("failed to serialize backfilled analysis", .{});
-        return;
-    };
-    storage.writeAnalyzedPgn(io, path, content) catch |err| {
-        log.warn("failed to write back backfilled analysis: {}", .{err});
-    };
+    serializeAndWriteBack(io, path, header, records, board_history, ga);
 }
 
 fn runGameViewer(

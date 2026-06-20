@@ -607,11 +607,6 @@ fn renderSummaryCard(win: Window, game: *const Game, y_in: u16) void {
     }
 }
 
-fn renderEndedHints(win: Window) void {
-    const hint_y = win.height -| 2;
-    _ = writeStr(win, 1, hint_y, "R Review  N Menu  Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-}
-
 pub fn renderInfoPanel(win: Window, game: *const Game) void {
     win.fill(.{ .style = .{ .bg = Theme.bg } });
 
@@ -643,7 +638,8 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
         }
         y += 1;
         renderSummaryCard(win, game, y);
-        renderEndedHints(win);
+        const hint_y = win.height -| 2;
+        _ = writeStr(win, 1, hint_y, "R Review  N Menu  Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         return;
     } else if (game.engine_state == .thinking) {
         const spinners = [_][]const u8{ "|", "/", "-", "\\" };
