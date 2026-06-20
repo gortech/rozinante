@@ -35,6 +35,11 @@ pub const GamePhase = enum {
 /// failed = the pass could not complete (engine died or absent).
 pub const AnalysisState = enum { none, pending, ready, failed };
 
+/// Endangered severity for a friendly non-king piece (plan U3/R9): none = safe;
+/// orange = attacked but the opponent does not strictly win material (SEE <= 0);
+/// red = the capture sequence strictly wins material (SEE > 0).
+pub const EndangeredLevel = enum { none, orange, red };
+
 pub const PromotionPending = struct {
     from: chess.Square,
     to: chess.Square,
@@ -203,7 +208,8 @@ pub const Game = struct {
     quit_pending: bool,
     leave_pending: bool,
     hints_enabled: bool,
-    hint_endangered: [64]bool,
+    hint_endangered: [64]EndangeredLevel,
+    hint_pinned: [64]bool,
     hint_best_move: ?LastMove,
     /// Post-game analysis result (U4/U7); valid once `analysis_state == .ready`.
     analysis: analysis.GameAnalysis,
@@ -246,7 +252,8 @@ pub const Game = struct {
             .quit_pending = false,
             .leave_pending = false,
             .hints_enabled = false,
-            .hint_endangered = [_]bool{false} ** 64,
+            .hint_endangered = [_]EndangeredLevel{.none} ** 64,
+            .hint_pinned = [_]bool{false} ** 64,
             .hint_best_move = null,
             .analysis = .{},
             .analysis_state = .none,
@@ -254,24 +261,39 @@ pub const Game = struct {
     }
 
     pub fn clearHints(self: *Game) void {
-        self.hint_endangered = [_]bool{false} ** 64;
+        self.hint_endangered = [_]EndangeredLevel{.none} ** 64;
+        self.hint_pinned = [_]bool{false} ** 64;
         self.hint_best_move = null;
     }
 
+    /// Recompute every position-derived learning aid for the current board.
+    /// Single entry point so the endangered and pin arrays can never drift.
+    pub fn recomputeHints(self: *Game) void {
+        self.computeEndangered();
+        self.computePins();
+    }
+
     pub fn computeEndangered(self: *Game) void {
-        self.hint_endangered = [_]bool{false} ** 64;
+        self.hint_endangered = [_]EndangeredLevel{.none} ** 64;
         const friendly_color = self.board.active_color;
         const opponent_color = friendly_color.opponent();
         for (0..64) |i| {
             const piece = self.board.squares[i];
-            if (piece.color()) |c| {
-                if (c == friendly_color) {
-                    const sq = chess.Square.fromIndex(@intCast(i));
-                    if (chess.isSquareAttacked(&self.board, sq, opponent_color)) {
-                        self.hint_endangered[i] = true;
-                    }
-                }
-            }
+            const c = piece.color() orelse continue;
+            if (c != friendly_color) continue;
+            if (piece.pieceType() == .king) continue; // king excluded; check is its signal (R7)
+            const sq = chess.Square.fromIndex(@intCast(i));
+            if (!chess.isSquareAttacked(&self.board, sq, opponent_color)) continue;
+            // Attacked: red iff the opponent strictly wins material, else orange.
+            self.hint_endangered[i] = if (chess.seeValue(&self.board, sq, opponent_color) > 0) .red else .orange;
+        }
+    }
+
+    /// Mark every absolutely-pinned piece of *both* colors (R10/R11).
+    pub fn computePins(self: *Game) void {
+        const pins = chess.detectPins(&self.board);
+        for (0..64) |i| {
+            self.hint_pinned[i] = pins.axes[i] != null;
         }
     }
 
@@ -602,14 +624,16 @@ const testing = @import("std").testing;
 test "clearHints zeroes all hint state" {
     var game = Game.init();
     game.hints_enabled = true;
-    game.hint_endangered[0] = true;
-    game.hint_endangered[63] = true;
+    game.hint_endangered[0] = .red;
+    game.hint_endangered[63] = .orange;
+    game.hint_pinned[5] = true;
     game.hint_best_move = .{ .from = chess.Square.init(.e, .@"2"), .to = chess.Square.init(.e, .@"4") };
 
     game.clearHints();
 
     for (0..64) |i| {
-        try testing.expect(!game.hint_endangered[i]);
+        try testing.expect(game.hint_endangered[i] == .none);
+        try testing.expect(!game.hint_pinned[i]);
     }
     try testing.expect(game.hint_best_move == null);
 }
@@ -622,7 +646,7 @@ test "computeEndangered marks attacked pieces on initial board" {
     // On the initial board with white to move, none of white's pieces are attacked
     // by black (black pawns on rank 7 don't attack rank 1 or 2)
     for (0..16) |i| {
-        try testing.expect(!game.hint_endangered[i]);
+        try testing.expect(game.hint_endangered[i] == .none);
     }
 }
 
@@ -645,9 +669,9 @@ test "computeEndangered detects piece attacked by opponent" {
     game.computeEndangered();
 
     // d4 pawn is attacked diagonally by e5 pawn
-    try testing.expect(game.hint_endangered[wp_sq.toIndex()]);
+    try testing.expect(game.hint_endangered[wp_sq.toIndex()] == .red);
     // King on e1 is not attacked
-    try testing.expect(!game.hint_endangered[wk_sq.toIndex()]);
+    try testing.expect(game.hint_endangered[wk_sq.toIndex()] == .none);
 }
 
 test "computeEndangered empty board has no endangered pieces" {
@@ -664,23 +688,51 @@ test "computeEndangered empty board has no endangered pieces" {
     game.computeEndangered();
 
     for (0..64) |i| {
-        try testing.expect(!game.hint_endangered[i]);
+        try testing.expect(game.hint_endangered[i] == .none);
     }
 }
 
 test "executeMove clears hints" {
     var game = Game.init();
     game.hints_enabled = true;
-    game.hint_endangered[0] = true;
+    game.hint_endangered[0] = .red;
     game.hint_best_move = .{ .from = chess.Square.init(.e, .@"2"), .to = chess.Square.init(.e, .@"4") };
 
     // Execute e2-e4
     game.executeMove(chess.Square.init(.e, .@"2"), chess.Square.init(.e, .@"4"), null);
 
     for (0..64) |i| {
-        try testing.expect(!game.hint_endangered[i]);
+        try testing.expect(game.hint_endangered[i] == .none);
     }
     try testing.expect(game.hint_best_move == null);
+}
+
+test "computeEndangered marks an even/defended attacked piece orange" {
+    var game = Game.init();
+    game.board = chess.Board.fromFen("4k3/8/6n1/4N3/3P4/8/8/4K3 w - - 0 1").?;
+    game.hints_enabled = true;
+    game.computeEndangered();
+    const e5 = chess.Square.init(.e, .@"5");
+    try testing.expect(game.hint_endangered[e5.toIndex()] == .orange);
+}
+
+test "computeEndangered excludes the king even when it is in check" {
+    var game = Game.init();
+    game.board = chess.Board.fromFen("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1").?;
+    game.hints_enabled = true;
+    game.computeEndangered();
+    const wk = chess.Square.init(.e, .@"1");
+    try testing.expect(game.hint_endangered[wk.toIndex()] == .none);
+}
+
+test "computePins marks pinned pieces of both colors (AE4)" {
+    var game = Game.init();
+    game.board = chess.Board.fromFen("4k3/3n4/2B5/8/8/2b5/3N4/4K3 w - - 0 1").?;
+    game.computePins();
+    const wd2 = chess.Square.init(.d, .@"2");
+    const bd7 = chess.Square.init(.d, .@"7");
+    try testing.expect(game.hint_pinned[wd2.toIndex()]);
+    try testing.expect(game.hint_pinned[bd7.toIndex()]);
 }
 
 fn tsq(f: chess.File, r: chess.Rank) chess.Square {
@@ -746,7 +798,7 @@ test "undoMovePair: restores playing phase and clears hints (R4)" {
     game.executeMove(tsq(.e, .@"7"), tsq(.e, .@"5"), null);
     game.hints_enabled = true;
     game.hint_best_move = .{ .from = tsq(.e, .@"2"), .to = tsq(.e, .@"4") };
-    game.hint_endangered[10] = true;
+    game.hint_endangered[10] = .red;
     game.game_phase = .ended;
     game.result = "Checkmate";
 
@@ -754,5 +806,5 @@ test "undoMovePair: restores playing phase and clears hints (R4)" {
     try testing.expectEqual(GamePhase.playing, game.game_phase);
     try testing.expect(game.result == null);
     try testing.expect(game.hint_best_move == null);
-    try testing.expect(!game.hint_endangered[10]);
+    try testing.expect(game.hint_endangered[10] == .none);
 }

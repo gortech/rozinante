@@ -7,6 +7,7 @@ const analysis_mod = @import("../analysis.zig");
 
 const Theme = &renderer.Theme;
 const Window = vaxis.Window;
+const keybar = @import("keybar.zig");
 
 pub const ViewerAction = enum {
     none,
@@ -31,6 +32,11 @@ pub const ViewerState = struct {
     analysis_state: AnalysisDisplay = .unavailable,
     /// Which color the human played, for player-perspective eval display (R4).
     player_color: chess.Color = .white,
+    /// Board orientation (R15): false = White at the bottom, true = flipped.
+    flipped: bool = false,
+    /// Whether the player explicitly pressed F this session; gates write-back of
+    /// the orientation so an untoggled game opens to its own default (R15a).
+    user_toggled: bool = false,
     /// Cursor into the swing-ranked key moments, null until the key is first pressed.
     key_moment_idx: ?usize = null,
     /// Scratch storage for the current frame's formatted best-move SAN and eval. It
@@ -67,6 +73,10 @@ pub const ViewerState = struct {
         }
         if (key.matches('n', .{})) self.nextKeyMoment();
         if (key.matches('p', .{})) self.prevKeyMoment();
+        if (key.matches('f', .{})) {
+            self.flipped = !self.flipped;
+            self.user_toggled = true;
+        }
         return .none;
     }
 
@@ -154,7 +164,7 @@ pub const ViewerState = struct {
         const board_w = renderer.boardWidth(opts);
         const board_h = renderer.boardHeight(opts);
 
-        if (win.width < board_w or win.height < board_h) {
+        if (win.width < board_w or win.height < board_h + keybar.height) {
             renderer.renderResizeMessage(win);
             return;
         }
@@ -165,7 +175,7 @@ pub const ViewerState = struct {
             .width = board_w,
             .height = board_h,
         });
-        renderer.renderBoardCore(board_win, self.currentBoard(), opts, false, null);
+        renderer.renderBoardCore(board_win, self.currentBoard(), opts, self.flipped, null);
 
         const info_x: u16 = board_w + 1;
         const info_w = if (win.width > info_x) win.width - info_x else 0;
@@ -176,6 +186,10 @@ pub const ViewerState = struct {
             .height = board_h,
         });
         self.renderInfoPanel(info_win);
+
+        const show_km = self.analysis_state == .ready and
+            (if (self.analysis) |ga| ga.key_moment_count > 0 else false);
+        keybar.renderBottom(win, keybar.reviewChips(show_km));
     }
 
     fn renderInfoPanel(self: *ViewerState, win: Window) void {
@@ -211,8 +225,7 @@ pub const ViewerState = struct {
             },
         }
 
-        const keybind_lines: u16 = 3;
-        const avail_h = if (win.height > y + keybind_lines) win.height - y - keybind_lines else 0;
+        const avail_h = if (win.height > y) win.height - y else 0;
 
         if (avail_h > 0 and self.total > 0) {
             const san_list = self.san_list[0..self.total];
@@ -263,12 +276,6 @@ pub const ViewerState = struct {
                 y += 1;
             }
         }
-
-        const hint_y = win.height -| 2;
-        if (hint_y > y) {
-            const hint = "\xe2\x86\x90\xe2\x86\x92 Step  Home/End  Esc Back";
-            _ = renderer.writeStr(win, 1, hint_y, hint, .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        }
     }
 
     /// Analysis panel lines for the current position: best move + eval (R4), the tier
@@ -293,18 +300,17 @@ pub const ViewerState = struct {
 
         if (pos > 0 and pos - 1 < ga.count) {
             const ma = ga.moves[pos - 1];
-            if (ma.tier) |t| {
-                var col = renderer.writeStr(win, 1, y, "Move ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-                col = renderer.writeStr(win, col, y, renderer.tierGlyph(t), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
-                col += 1;
-                _ = renderer.writeStr(win, col, y, moveLabel(ma.cpl), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
-                y += 1;
-            }
+            const t = ma.tier orelse analysis_mod.tierFromCpl(ma.cpl);
+            var col = renderer.writeStr(win, 1, y, "Move ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            col = renderer.writeStr(win, col, y, renderer.tierGlyph(t), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
+            col += 1;
+            _ = renderer.writeStr(win, col, y, moveLabel(ma.cpl), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
+            y += 1;
         }
 
         if (ga.key_moment_count > 0) {
-            // Discoverable key-moment nav (R6): n/p jump between the biggest swings.
-            var col = renderer.writeStr(win, 1, y, "n/p key moment", .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            // Key-moment status (R6); the n/p jump keys live in the keybar.
+            var col = renderer.writeStr(win, 1, y, "Key moment", .{ .fg = Theme.text_dim, .bg = Theme.bg });
             if (self.key_moment_idx) |ki| {
                 col = renderer.writeStr(win, col, y, " ", .{ .fg = Theme.text_dim, .bg = Theme.bg });
                 col = renderer.writeNum(win, col, y, @intCast(ki + 1), .{ .fg = Theme.text_primary, .bg = Theme.bg });
@@ -320,12 +326,12 @@ pub const ViewerState = struct {
     }
 };
 
-/// Draw a 1-char tier glyph after a move's SAN (player plies only), if the panel has
-/// room. Returns the column after the glyph (or `col` unchanged when skipped).
+/// Draw a 1-char tier glyph after a move's SAN for either side — engine plies
+/// derive the tier from the always-present cpl (R16) — if the panel has room.
 fn drawTierGlyph(win: Window, col: u16, y: u16, ana: ?*const analysis_mod.GameAnalysis, ply: usize) u16 {
     const ga = ana orelse return col;
     if (ply >= ga.count) return col;
-    const t = ga.moves[ply].tier orelse return col;
+    const t = ga.moves[ply].tier orelse analysis_mod.tierFromCpl(ga.moves[ply].cpl);
     const gx = col + 1;
     if (gx >= win.width) return col; // no room in a narrow panel
     return renderer.writeStr(win, gx, y, renderer.tierGlyph(t), .{ .fg = renderer.tierColor(t), .bg = Theme.bg });
@@ -476,5 +482,123 @@ test "viewer paints the best-move SAN + eval (not a dangling slice)" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Best") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "e4") != null); // the best-move SAN must paint
     try std.testing.expect(std.mem.indexOf(u8, text, "+0.3") != null); // and its eval
-    try std.testing.expect(std.mem.indexOf(u8, text, "n/p") != null); // key-moment nav is discoverable
+    try std.testing.expect(std.mem.indexOf(u8, text, "Key moment") != null); // key-moment status shows in the panel
+}
+
+test "viewer paints the keybar on the bottom row below the board at min height (AE11)" {
+    const alloc = std.testing.allocator;
+    const boards = [_]chess.Board{chess.Board.initial};
+    const sans: [1]pgn.SanNotation = undefined;
+    var v = ViewerState.init(&boards, &sans, 0);
+
+    const board_h = renderer.boardHeight(.{});
+    const h: u16 = board_h + keybar.height;
+    const w: u16 = 130;
+    var screen = try vaxis.Screen.init(alloc, .{ .rows = h, .cols = w, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(alloc);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = w, .height = h, .screen = &screen };
+    v.render(win);
+
+    // The bar (review's Back chip) must paint on the last row — proving the guard
+    // passed (board fit) and the bar sits below the board without overlap.
+    var buf: [512]u8 = undefined;
+    var n: usize = 0;
+    for (0..w) |c| {
+        const cell = screen.readCell(@intCast(c), h - 1) orelse continue;
+        for (cell.char.grapheme) |ch| if (n < buf.len) {
+            buf[n] = ch;
+            n += 1;
+        };
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "Back") != null);
+}
+
+fn fakeKey(codepoint: u21, mods: vaxis.Key.Modifiers) vaxis.Key {
+    return .{ .codepoint = codepoint, .mods = mods };
+}
+
+test "viewer: F toggles orientation and marks user_toggled; stepping preserves it (AE6)" {
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var v = ViewerState.init(&boards, &sans, 1);
+    try std.testing.expect(!v.flipped and !v.user_toggled);
+
+    _ = v.handleInput(fakeKey('f', .{}));
+    try std.testing.expect(v.flipped and v.user_toggled);
+
+    // Stepping forward/backward must not change the chosen orientation.
+    _ = v.handleInput(fakeKey(vaxis.Key.left, .{}));
+    _ = v.handleInput(fakeKey(vaxis.Key.right, .{}));
+    try std.testing.expect(v.flipped);
+
+    _ = v.handleInput(fakeKey('f', .{}));
+    try std.testing.expect(!v.flipped);
+}
+
+test "viewer: stepping without F leaves orientation untoggled (mixed-color re-entry)" {
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var v = ViewerState.init(&boards, &sans, 1);
+    _ = v.handleInput(fakeKey(vaxis.Key.left, .{}));
+    _ = v.handleInput(fakeKey(vaxis.Key.right, .{}));
+    // No F press => main never persists this game's orientation to the next.
+    try std.testing.expect(!v.user_toggled);
+}
+
+fn scrapePanel(screen: *vaxis.Screen, w: u16, h: u16, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (0..h) |r| {
+        for (0..w) |c| {
+            const cell = screen.readCell(@intCast(c), @intCast(r)) orelse continue;
+            for (cell.char.grapheme) |ch| if (n < buf.len) {
+                buf[n] = ch;
+                n += 1;
+            };
+        }
+    }
+    return buf[0..n];
+}
+
+test "renderAnalysisLines shows the Move quality line for an engine ply (AE7)" {
+    const alloc = std.testing.allocator;
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var ga = analysis_mod.GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 0, .tier = .good });
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 120, .tier = null }); // engine ply
+
+    var v = ViewerState.init(&boards, &sans, 2);
+    v.position = 2; // position after the engine's ply 1
+    v.analysis = &ga;
+    v.analysis_state = .ready;
+
+    var screen = try vaxis.Screen.init(alloc, .{ .rows = 20, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(alloc);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 20, .screen = &screen };
+    _ = v.renderAnalysisLines(win, 0, &ga);
+
+    var buf: [2048]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, scrapePanel(&screen, 40, 20, &buf), "mistake") != null);
+}
+
+test "renderAnalysisLines uses the stored tier for a player ply" {
+    const alloc = std.testing.allocator;
+    const boards = [_]chess.Board{ chess.Board.initial, chess.Board.initial, chess.Board.initial };
+    const sans: [2]pgn.SanNotation = undefined;
+    var ga = analysis_mod.GameAnalysis{};
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 0, .tier = .good });
+    ga.append(.{ .eval = .{ .cp = 0 }, .best = null, .best_eval = .{ .cp = 0 }, .cpl = 120, .tier = null });
+
+    var v = ViewerState.init(&boards, &sans, 2);
+    v.position = 1; // after the player's ply 0 (stored tier .good)
+    v.analysis = &ga;
+    v.analysis_state = .ready;
+
+    var screen = try vaxis.Screen.init(alloc, .{ .rows = 20, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(alloc);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 20, .screen = &screen };
+    _ = v.renderAnalysisLines(win, 0, &ga);
+
+    var buf: [2048]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, scrapePanel(&screen, 20, 20, &buf), "good") != null);
 }

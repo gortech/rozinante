@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const renderer = @import("renderer.zig");
 const storage = @import("../persistence/storage.zig");
 const input = @import("input.zig");
+const keybar = @import("keybar.zig");
 
 const Theme = &renderer.Theme;
 const Window = vaxis.Window;
@@ -77,6 +78,11 @@ pub const HistoryScreen = struct {
         win.clear();
         win.fill(.{ .style = .{ .bg = Theme.bg } });
 
+        if (win.width < 20 or win.height <= keybar.height + 4) {
+            renderer.renderResizeMessage(win);
+            return;
+        }
+
         const total = self.games.items.len;
         const content_w: u16 = 60;
         const x0: u16 = if (win.width > content_w) (win.width - content_w) / 2 else 0;
@@ -93,6 +99,11 @@ pub const HistoryScreen = struct {
                 .flat => "\xe2\x86\x92 steady",
             };
             _ = renderer.writeStr(win, x0 + 2, y, txt, .{ .fg = Theme.text_dim, .bg = Theme.bg });
+            y += 2;
+        }
+
+        if (self.delete_pending) {
+            _ = renderer.writeStr(win, x0 + 2, y, "Delete permanently?", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
             y += 2;
         }
 
@@ -116,7 +127,7 @@ pub const HistoryScreen = struct {
             _ = renderer.writeStr(win, x0 + 1, y, sep, .{ .fg = Theme.text_dim, .bg = Theme.bg });
             y += 1;
 
-            const avail_rows: usize = if (win.height > y + 3) win.height - y - 3 else 1;
+            const avail_rows: usize = if (win.height > y + keybar.height) win.height - y - keybar.height else 1;
             const visible = @min(total, avail_rows);
 
             if (cursor < scroll) scroll = cursor;
@@ -159,16 +170,7 @@ pub const HistoryScreen = struct {
             }
         }
 
-        const hint_y = win.height -| 2;
-        if (hint_y > y) {
-            const hints = if (self.delete_pending)
-                "Delete permanently? Y/Enter = Yes  N/Esc = No"
-            else if (total > 0)
-                "\xe2\x86\x91\xe2\x86\x93 Navigate  Enter View  Del Remove  Esc Back"
-            else
-                "Esc Back";
-            _ = renderer.writeStr(win, x0 + 1, hint_y, hints, .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        }
+        keybar.renderBottom(win, keybar.historyChips(total, self.delete_pending));
     }
 };
 
@@ -277,4 +279,28 @@ test "computeTrend: worsening when recent mistakes rise" {
 test "computeTrend: null below two analyzed games" {
     const games = [_]storage.GameInfo{ gameWithBlunders(null), gameWithBlunders(3) };
     try std.testing.expectEqual(@as(?Trend, null), computeTrend(&games));
+}
+
+test "history shows the resize message when too short for the bar (AE11)" {
+    var list = std.ArrayList(storage.GameInfo).empty;
+    defer list.deinit(std.testing.allocator);
+    const screen_state = HistoryScreen.init(list);
+
+    var screen = try vaxis.Screen.init(std.testing.allocator, .{ .rows = 3, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(std.testing.allocator);
+    const win = vaxis.Window{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 3, .screen = &screen };
+    screen_state.render(win);
+
+    var buf: [256]u8 = undefined;
+    var n: usize = 0;
+    for (0..3) |r| {
+        for (0..40) |c| {
+            const cell = screen.readCell(@intCast(c), @intCast(r)) orelse continue;
+            for (cell.char.grapheme) |ch| if (n < buf.len) {
+                buf[n] = ch;
+                n += 1;
+            };
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "too small") != null);
 }

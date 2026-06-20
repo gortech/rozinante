@@ -57,8 +57,7 @@ pub const Engine = struct {
             .stdout_reader = undefined,
         };
 
-        engine.stdin_writer = File.Writer.initStreaming(child.stdin.?, io, &engine.stdin_buf);
-        engine.stdout_reader = File.Reader.initStreaming(child.stdout.?, io, &engine.stdout_buf);
+        engine.relocate();
 
         try engine.uciHandshake();
 
@@ -232,8 +231,7 @@ pub const Engine = struct {
             .stderr = .ignore,
         });
         self.child = child;
-        self.stdin_writer = File.Writer.initStreaming(child.stdin.?, self.io, &self.stdin_buf);
-        self.stdout_reader = File.Reader.initStreaming(child.stdout.?, self.io, &self.stdout_buf);
+        self.relocate();
         self.is_ready = false;
 
         try self.uciHandshake();

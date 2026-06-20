@@ -11,6 +11,7 @@ const MenuAction = rozinante.tui.menu.MenuAction;
 const PlayerColor = rozinante.tui.menu.PlayerColor;
 const HistoryScreen = rozinante.tui.history.HistoryScreen;
 const ViewerState = rozinante.tui.viewer.ViewerState;
+const keybar = rozinante.tui.keybar;
 const engine_mod = rozinante.engine;
 const analysis_mod = rozinante.analysis;
 const openings = rozinante.openings;
@@ -128,7 +129,7 @@ fn analysisWork(eng: *engine_mod.Engine, board: *const chess.Board, result: *Eng
 // Resize gate, derived from renderer geometry so a cell-size change auto-propagates.
 const min_info_w: u16 = 19; // info-panel columns right of the board (info_x = board_w + 1)
 const MIN_W: u16 = renderer.boardWidth(.{}) + 1 + min_info_w;
-const MIN_H: u16 = renderer.boardHeight(.{});
+const MIN_H: u16 = renderer.boardHeight(.{}) + keybar.height;
 
 fn fits(width: u16, height: u16) bool {
     return width >= MIN_W and height >= MIN_H;
@@ -396,6 +397,8 @@ fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
             .height = board_h,
         });
         renderer.renderInfoPanel(info_win, game_state);
+
+        keybar.renderBottom(win, keybar.gameChips(game_state));
     } else {
         renderer.renderResizeMessage(win);
     }
@@ -598,6 +601,19 @@ fn writeBackViewerAnalysis(
     serializeAndWriteBack(io, path, header, records, board_history, ga);
 }
 
+/// Review board orientation, persisted for the process lifetime so it survives
+/// leaving and re-entering review within a session (R15a). null until the player
+/// first toggles with F; an untoggled game always opens to its own
+/// player-perspective default, so reviewing a Black game never flips the next
+/// White game.
+var review_flipped: ?bool = null;
+
+/// Seed the review board orientation: a previously toggled choice persists; an
+/// untoggled game opens to its own player perspective (R15a).
+fn reviewSeedFlip(persisted: ?bool, player_color: chess.Color) bool {
+    return persisted orelse (player_color == .black);
+}
+
 fn runGameViewer(
     io: Io,
     alloc: std.mem.Allocator,
@@ -627,6 +643,7 @@ fn runGameViewer(
 
     var viewer = ViewerState.init(&boards, &san_list, move_count);
     viewer.player_color = viewerPlayerColor(&parsed);
+    viewer.flipped = reviewSeedFlip(review_flipped, viewer.player_color);
 
     // --- Analysis: cached if present, else backfill via a provisioned engine (U5) ---
     var pass_future: ?Io.Future(void) = null;
@@ -684,6 +701,7 @@ fn runGameViewer(
         switch (event) {
             .key_press => |key| {
                 const action = viewer.handleInput(key);
+                if (viewer.user_toggled) review_flipped = viewer.flipped;
                 switch (action) {
                     .back => return .back_to_history,
                     .none => {},
@@ -1054,7 +1072,7 @@ pub fn main(init: std.process.Init) !void {
                             .toggle_hints => {
                                 game_state.hints_enabled = !game_state.hints_enabled;
                                 if (game_state.hints_enabled) {
-                                    game_state.computeEndangered();
+                                    game_state.recomputeHints();
                                     if (current_engine) |*eng| {
                                         dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
                                     }
@@ -1073,7 +1091,7 @@ pub fn main(init: std.process.Init) !void {
                                     cancelAnalysis(io, eng, &analysis_future, &analysis_pending);
                                 }
                                 if (game_state.hints_enabled) {
-                                    game_state.computeEndangered();
+                                    game_state.recomputeHints();
                                     if (current_engine) |*eng| {
                                         dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
                                     }
@@ -1138,7 +1156,7 @@ pub fn main(init: std.process.Init) !void {
                             log.debug("engine move applied, move_count now {d}", .{game_state.move_count});
 
                             if (game_state.hints_enabled and game_state.isHumanTurn()) {
-                                game_state.computeEndangered();
+                                game_state.recomputeHints();
                                 if (current_engine) |*eng| {
                                     dispatchAnalysis(io, eng, &game_state, &analysis_board, &analysis_result, &analysis_future, &analysis_pending, &loop);
                                 }
@@ -1237,4 +1255,11 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+}
+
+test "reviewSeedFlip: persisted choice wins; else player perspective (R15a)" {
+    try std.testing.expect(!reviewSeedFlip(null, .white)); // white default: not flipped
+    try std.testing.expect(reviewSeedFlip(null, .black)); // black default: flipped
+    try std.testing.expect(reviewSeedFlip(true, .white)); // a toggled flip overrides the white default
+    try std.testing.expect(!reviewSeedFlip(false, .black)); // a toggled no-flip overrides the black default
 }

@@ -26,10 +26,14 @@ pub const Palette = struct {
     highlight_engine_move: Color,
     highlight_endangered: Color,
     highlight_hint_best: Color,
+    highlight_endangered_high: Color,
+    highlight_pin: Color,
     selection_bg: Color,
     eval_good: Color,
     eval_meh: Color,
     eval_bad: Color,
+    keybar_chip_bg: Color,
+    keybar_chip_fg: Color,
 };
 
 pub const ThemeId = enum {
@@ -90,11 +94,15 @@ fn paletteOf(bg: [3]u8, dark: [3]u8, light: [3]u8, wp: [3]u8, bp: [3]u8, tp: [3]
         .highlight_promotion = rgb(.{ 255, 200, 0 }),
         .highlight_engine_move = rgb(.{ 0, 220, 180 }),
         .highlight_endangered = rgb(.{ 255, 100, 50 }),
+        .highlight_endangered_high = rgb(.{ 170, 0, 30 }),
         .highlight_hint_best = rgb(.{ 50, 200, 100 }),
+        .highlight_pin = rgb(.{ 60, 110, 255 }),
         .selection_bg = rgb(sel),
         .eval_good = rgb(.{ 80, 210, 120 }),
         .eval_meh = rgb(.{ 230, 190, 70 }),
         .eval_bad = rgb(.{ 235, 85, 85 }),
+        .keybar_chip_bg = rgb(.{ 70, 80, 100 }),
+        .keybar_chip_fg = rgb(.{ 240, 240, 245 }),
     };
 }
 
@@ -165,7 +173,8 @@ pub const BorderStyle = enum { selected, capture, check, flash, engine };
 pub const Marks = struct {
     border: ?BorderStyle = null,
     cursor: bool = false,
-    endangered: bool = false,
+    endangered: game_mod.EndangeredLevel = .none,
+    pin: bool = false,
     best_move: bool = false,
     center: bool = false,
 };
@@ -209,6 +218,7 @@ pub fn squareMarks(game: *const Game, sq_idx: u6) Marks {
 
     if (game.hints_enabled) {
         marks.endangered = game.hint_endangered[sq_idx];
+        marks.pin = game.hint_pinned[sq_idx];
         if (game.hint_best_move) |bm|
             marks.best_move = bm.from.toIndex() == sq_idx or bm.to.toIndex() == sq_idx;
     }
@@ -333,10 +343,15 @@ pub fn drawMarks(win: Window, cx: u16, ry: u16, opts: RenderOptions, marks: Mark
     }
 
     // Layer 3: hint corners — thick, edge-aligned (compose).
+    if (marks.pin)
+        hRun(win, left, left + 1, top, FULL, Theme.highlight_pin, base); // █ top-left
     if (marks.best_move)
-        hRun(win, right - 1, right, top, FULL, Theme.highlight_hint_best, base); // ▀ top-right
-    if (marks.endangered)
-        hRun(win, left, left + 1, bottom, FULL, Theme.highlight_endangered, base); // ▄ bottom-left
+        hRun(win, right - 1, right, top, FULL, Theme.highlight_hint_best, base); // █ top-right
+    switch (marks.endangered) {
+        .none => {},
+        .orange => hRun(win, left, left + 1, bottom, FULL, Theme.highlight_endangered, base), // █ bottom-left
+        .red => hRun(win, left, left + 1, bottom, FULL, Theme.highlight_endangered_high, base),
+    }
 
     // Layer 4: cursor — thick bright segments at the middle of each edge (top
     // layer, most visible).
@@ -621,16 +636,14 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     if (game.promotion_pending) |pp| {
         renderPromotionStatus(win, 1, y, pp, game);
         y += 1;
-        _ = writeStr(win, 1, y, "\u{2190}\u{2192} cycle  Enter confirm  Esc cancel", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        y += 1;
     } else if (game.resign_pending) {
-        _ = writeStr(win, 1, y, "Resign? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        _ = writeStr(win, 1, y, "Resign?", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         y += 1;
     } else if (game.quit_pending) {
-        _ = writeStr(win, 1, y, "Quit game? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        _ = writeStr(win, 1, y, "Quit game?", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         y += 1;
     } else if (game.leave_pending) {
-        _ = writeStr(win, 1, y, "Leave to menu? Y/Enter = Yes, N/Esc = No", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
+        _ = writeStr(win, 1, y, "Leave to menu?", .{ .fg = Theme.highlight_check, .bg = Theme.bg });
         y += 1;
     } else if (game.game_phase == .ended) {
         if (game.result) |result| {
@@ -638,8 +651,6 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
         }
         y += 1;
         renderSummaryCard(win, game, y);
-        const hint_y = win.height -| 2;
-        _ = writeStr(win, 1, hint_y, "R Review  N Menu  Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
         return;
     } else if (game.engine_state == .thinking) {
         const spinners = [_][]const u8{ "|", "/", "-", "\\" };
@@ -690,8 +701,7 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     }
 
     // Move history
-    const keybind_lines: u16 = 3;
-    const avail_h = if (win.height > y + keybind_lines) win.height - y - keybind_lines else 0;
+    const avail_h = if (win.height > y) win.height - y else 0;
 
     if (avail_h > 0 and game.move_count > 0) {
         const total_pairs: u16 = @intCast((game.move_count + 1) / 2);
@@ -720,16 +730,6 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
 
             y += 1;
         }
-    }
-
-    // Keybind hints at bottom
-    const hint_y = win.height -| 2;
-    if (hint_y > y) {
-        _ = writeStr(win, 1, hint_y, "\u{2191}\u{2193}\u{2190}\u{2192} Move  Enter Select  U Undo", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        var hint_col = writeStr(win, 1, hint_y + 1, "R Resign N Menu F Flip Q Quit", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        hint_col = writeStr(win, hint_col + 1, hint_y + 1, "H Hints", .{ .fg = Theme.text_dim, .bg = Theme.bg });
-        const hint_status: []const u8 = if (game.hints_enabled) " On" else " Off";
-        _ = writeStr(win, hint_col, hint_y + 1, hint_status, .{ .fg = Theme.text_dim, .bg = Theme.bg });
     }
 }
 
@@ -776,15 +776,28 @@ test "squareMarks: capture composes with endangered and best-move corners (AE2)"
     game.board.squares[sq.toIndex()] = chess.Piece.init(.black, .knight);
     game.legal_targets[sq.toIndex()] = true;
     game.hints_enabled = true;
-    game.hint_endangered[sq.toIndex()] = true;
+    game.hint_endangered[sq.toIndex()] = .red;
     game.hint_best_move = .{ .from = chess.Square.init(.a, .@"1"), .to = sq };
 
     const m = squareMarks(&game, sq.toIndex());
     try testing.expectEqual(BorderStyle.capture, m.border.?);
-    try testing.expect(m.endangered);
+    try testing.expect(m.endangered == .red);
     try testing.expect(m.best_move);
     // from-arm of the best_move disjunction (bm.from == sq)
     try testing.expect(squareMarks(&game, chess.Square.init(.a, .@"1").toIndex()).best_move);
+}
+
+test "squareMarks: pin and endangered level surface when hints on" {
+    var game = Game.init();
+    game.board = chess.Board.empty();
+    const sq = chess.Square.init(.d, .@"4");
+    game.board.squares[sq.toIndex()] = chess.Piece.init(.white, .knight);
+    game.hints_enabled = true;
+    game.hint_endangered[sq.toIndex()] = .red;
+    game.hint_pinned[sq.toIndex()] = true;
+    const m = squareMarks(&game, sq.toIndex());
+    try testing.expect(m.endangered == .red);
+    try testing.expect(m.pin);
 }
 
 test "squareMarks: check outranks selected on the king square (AE3)" {
@@ -876,11 +889,13 @@ test "squareMarks: hints disabled suppresses endangered and best-move" {
     var game = Game.init();
     game.hints_enabled = false;
     const sq = chess.Square.init(.a, .@"8");
-    game.hint_endangered[sq.toIndex()] = true;
+    game.hint_endangered[sq.toIndex()] = .red;
+    game.hint_pinned[sq.toIndex()] = true;
     game.hint_best_move = .{ .from = sq, .to = chess.Square.init(.a, .@"7") };
 
     const m = squareMarks(&game, sq.toIndex());
-    try testing.expect(!m.endangered);
+    try testing.expect(m.endangered == .none);
+    try testing.expect(!m.pin);
     try testing.expect(!m.best_move);
 }
 
@@ -892,7 +907,7 @@ test "squareMarks: quiet empty square has no marks" {
 
     const m = squareMarks(&game, sq.toIndex());
     try testing.expect(m.border == null);
-    try testing.expect(!m.cursor and !m.endangered and !m.best_move and !m.center);
+    try testing.expect(!m.cursor and m.endangered == .none and !m.best_move and !m.center and !m.pin);
 }
 
 test "drawMarks: writes nothing below the minimum cell size (guard)" {
@@ -906,7 +921,7 @@ test "drawMarks: writes nothing below the minimum cell size (guard)" {
         }
     }
 
-    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = .red, .pin = true, .best_move = true, .center = true };
     drawMarks(win, 2, 2, .{ .cell_w = 11, .cell_h = 6 }, marks, Theme.dark_square);
 
     for (0..20) |y| {
@@ -929,11 +944,17 @@ test "drawMarks: marks stay inside the cell rect (containment)" {
 
     const cx: u16 = 2;
     const ry: u16 = 2;
-    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true, .center = true };
+    const marks: Marks = .{ .border = .capture, .cursor = true, .endangered = .red, .pin = true, .best_move = true, .center = true };
     drawMarks(win, cx, ry, .{}, marks, Theme.dark_square);
 
     // It actually drew: the cell's top-left corner is now a (multi-byte) mark glyph, not the sentinel.
     try testing.expect(!std.mem.eql(u8, "X", screen.readCell(cx, ry).?.char.grapheme));
+    // AE12: pin (top-left blue) and endangered-red (bottom-left) compose, each
+    // painting its own corner with its own color, neither clobbering the other.
+    try testing.expect(std.meta.eql(screen.readCell(cx, ry).?.style.fg, Theme.highlight_pin));
+    const bl = screen.readCell(cx, ry + 5).?;
+    try testing.expectEqualStrings(FULL, bl.char.grapheme);
+    try testing.expect(std.meta.eql(bl.style.fg, Theme.highlight_endangered_high));
 
     // No mark bled outside [cx, cx+12) x [ry, ry+6); vaxis clips to the window, not the cell.
     for (0..20) |yy| {
@@ -955,13 +976,35 @@ test "palette: classic reproduces the original RGBs (R12)" {
     try testing.expectEqual(Color{ .rgb = .{ 105, 70, 150 } }, p.light_square);
 }
 
-test "palette: marks pairwise-distinct and distinct from squares for every theme (R10)" {
+pub fn colorDist2(a: Color, b: Color) u32 {
+    var sum: u32 = 0;
+    for (0..3) |k| {
+        const d = @as(i32, a.rgb[k]) - @as(i32, b.rgb[k]);
+        sum += @intCast(d * d);
+    }
+    return sum;
+}
+
+test "palette: marks pairwise-distinct and distinct from squares for every theme (R10, R13)" {
+    // R13: pairs involving a new color (pin, endangered-high) must clear a
+    // perceptual delta; existing-vs-existing pairs keep bare inequality so no
+    // shipped color is retuned (e.g. check red and flash red are only ~50 apart).
+    const min_delta2: u32 = 60 * 60; // squared Euclidean RGB threshold
     for ([_]ThemeId{ .classic, .wood, .green, .blue }) |id| {
         const p = palette(id);
-        const marks = [_]Color{ p.highlight_cursor, p.highlight_legal, p.highlight_check, p.highlight_endangered, p.highlight_hint_best };
+        const marks = [_]Color{
+            p.highlight_cursor, p.highlight_legal,           p.highlight_check,
+            p.highlight_flash,  p.highlight_endangered,      p.highlight_hint_best,
+            p.highlight_pin,    p.highlight_endangered_high,
+        };
+        const first_new = 6; // indices >= 6 are the new colors
         for (marks, 0..) |a, i| {
-            for (marks[i + 1 ..]) |b| {
-                try testing.expect(!std.meta.eql(a, b));
+            for (marks[i + 1 ..], i + 1..) |b, j| {
+                if (i >= first_new or j >= first_new) {
+                    try testing.expect(colorDist2(a, b) >= min_delta2);
+                } else {
+                    try testing.expect(!std.meta.eql(a, b));
+                }
             }
             try testing.expect(!std.meta.eql(a, p.dark_square));
             try testing.expect(!std.meta.eql(a, p.light_square));
@@ -1035,4 +1078,30 @@ test "summary card shows em dash when accuracy is null (no rated move)" {
     const text = renderPanelToText(&buf, &game, 30);
     try testing.expect(std.mem.indexOf(u8, text, "Accuracy") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\u{2014}") != null);
+}
+
+test "renderInfoPanel: in-game keys live in the keybar, not the panel (AE10)" {
+    var buf: [4096]u8 = undefined;
+
+    // Normal in-progress play: the panel carries no key footer.
+    var game = Game.init();
+    const text = renderPanelToText(&buf, &game, 30);
+    try testing.expect(std.mem.indexOf(u8, text, "Undo") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "Resign") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "Flip") == null);
+
+    // Confirm prompt: the question stays in the panel, the Y/N keys live in the bar.
+    var confirm = Game.init();
+    confirm.resign_pending = true;
+    const ctext = renderPanelToText(&buf, &confirm, 30);
+    try testing.expect(std.mem.indexOf(u8, ctext, "Resign?") != null);
+    try testing.expect(std.mem.indexOf(u8, ctext, "Y/Enter") == null);
+
+    // Game over: the R Review / N Menu / Q Quit footer moved to the bar.
+    var over = Game.init();
+    over.game_phase = .ended;
+    over.result = "1-0";
+    const otext = renderPanelToText(&buf, &over, 30);
+    try testing.expect(std.mem.indexOf(u8, otext, "Review") == null);
+    try testing.expect(std.mem.indexOf(u8, otext, "Menu") == null);
 }

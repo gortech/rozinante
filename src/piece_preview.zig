@@ -62,13 +62,13 @@ const samples = [_]Sample{
     .{ .label = "legal (empty)", .marks = .{ .center = true } },
     .{ .label = "capture", .marks = .{ .border = .capture } },
     .{ .label = "check", .marks = .{ .border = .check } },
-    .{ .label = "endangered", .marks = .{ .endangered = true } },
+    .{ .label = "endangered O", .marks = .{ .endangered = .orange } },
+    .{ .label = "endangered R", .marks = .{ .endangered = .red } },
+    .{ .label = "pin", .marks = .{ .pin = true } },
     .{ .label = "best move", .marks = .{ .best_move = true } },
     .{ .label = "engine move", .marks = .{ .border = .engine } },
     .{ .label = "capture flash", .marks = .{ .border = .flash } },
-    .{ .label = "cap+endgr+best", .marks = .{ .border = .capture, .endangered = true, .best_move = true } },
-    .{ .label = "selected+cursor", .marks = .{ .border = .selected, .cursor = true } },
-    .{ .label = "MAX stack", .marks = .{ .border = .capture, .cursor = true, .endangered = true, .best_move = true } },
+    .{ .label = "pin+endgr R", .marks = .{ .pin = true, .endangered = .red } },
 };
 
 const gallery_cols: u16 = 4;
@@ -177,6 +177,7 @@ fn render(win: vaxis.Window) void {
     _ = renderer.writeStr(win, 0, leg, "Legend:", primary);
     _ = renderer.writeStr(win, 2, leg + 1, "outline = border (one wins): check/flash solid, selected thick, capture/engine thin; hue per state", dim);
     _ = renderer.writeStr(win, 2, leg + 2, "cursor = bright edge-mid blocks   best move = top-right   endangered = bottom-left   center = legal-empty square", dim);
+    _ = renderer.writeStr(win, 2, leg + 3, "pin = top-left blue (both colors)   endangered: orange = attacked-but-safe, red = losing material", dim);
 }
 
 fn drawSample(
