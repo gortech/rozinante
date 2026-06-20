@@ -21,9 +21,7 @@ pub const PlayerColor = enum {
 
     pub fn fromString(s: []const u8) PlayerColor {
         const std = @import("std");
-        if (std.mem.eql(u8, s, "black")) return .black;
-        if (std.mem.eql(u8, s, "random")) return .random;
-        return .white;
+        return std.meta.stringToEnum(PlayerColor, s) orelse .white;
     }
 
     pub fn toString(self: PlayerColor) []const u8 {

@@ -23,7 +23,6 @@ pub const makeMove = movegen.makeMove;
 pub const legalMoves = movegen.legalMoves;
 pub const isSquareAttacked = movegen.isSquareAttacked;
 pub const isInCheck = movegen.isInCheck;
-pub const isCheck = movegen.isInCheck;
 pub const findKing = movegen.findKing;
 pub const Pins = pin.Pins;
 pub const detectPins = pin.detect;
@@ -33,8 +32,6 @@ pub const isStalemate = rules.isStalemate;
 pub const isDraw = rules.isDraw;
 pub const isFiftyMoveRule = rules.isFiftyMoveRule;
 pub const isInsufficientMaterial = rules.isInsufficientMaterial;
-pub const moveToUci = Move.toUci;
-pub const uciToMove = Move.fromUci;
 
 test {
     @import("std").testing.refAllDecls(@This());

@@ -124,15 +124,7 @@ pub fn historyChips(total: usize, delete_pending: bool) []const Chip {
 /// Display columns a string occupies (one per codepoint; matches `writeStr`,
 /// which renders each grapheme at width 1).
 fn displayWidth(text: []const u8) u16 {
-    var w: u16 = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const b = text[i];
-        const byte_len: usize = if (b < 0x80) 1 else if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
-        i += byte_len;
-        w += 1;
-    }
-    return w;
+    return @intCast(std.unicode.utf8CountCodepoints(text) catch unreachable);
 }
 
 /// Rendered width of one chip: " key " (padded) + " label".
