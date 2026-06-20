@@ -1,7 +1,7 @@
 ---
 title: "feat: Controls bar, threat marks & review improvements"
 type: feat
-status: active
+status: completed
 date: 2026-06-20
 origin: docs/brainstorms/controls-threat-marks-review-requirements.md
 ---
