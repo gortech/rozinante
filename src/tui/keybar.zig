@@ -99,8 +99,8 @@ const history_empty = [_]Chip{
 /// input); `.error` keeps the normal set.
 pub fn gameChips(game: *const Game) []const Chip {
     if (game.resign_pending or game.quit_pending or game.leave_pending) return &confirm_yn;
-    if (game.promotion_pending != null) return &game_promotion;
     if (game.engine_state == .thinking or game.engine_state == .reconnecting) return &game_engine_busy;
+    if (game.promotion_pending != null) return &game_promotion;
     if (game.game_phase == .ended) return &game_over;
     return &game_normal;
 }
@@ -176,6 +176,18 @@ pub fn render(win: Window, chips: []const Chip) void {
         x = renderer.writeStr(win, x, 0, chip.label, label_style);
         x += 1; // separator
     }
+}
+
+/// Reserve the bottom `height` row of `win` and draw `chips` there. Centralizes
+/// the per-screen bottom-row geometry so every screen reserves it identically.
+pub fn renderBottom(win: Window, chips: []const Chip) void {
+    const bar = win.child(.{
+        .x_off = 0,
+        .y_off = win.height - height,
+        .width = win.width,
+        .height = height,
+    });
+    render(bar, chips);
 }
 
 const testing = std.testing;
@@ -260,25 +272,22 @@ test "fittedCount: keeps the priority head and drops the tail (R6a)" {
     try testing.expect(partial > 0 and partial < game_normal.len);
     // Too small for even one chip renders nothing, no crash.
     try testing.expectEqual(@as(usize, 0), fittedCount(&game_normal, 1));
+    // The priority head order is fixed (R6a): move > select > quit > menu come
+    // first, so a narrow bar never drops one of them before Resign/Flip/Hints/Undo.
+    try testing.expectEqualStrings("Move", game_normal[0].label);
+    try testing.expectEqualStrings("Select", game_normal[1].label);
+    try testing.expectEqualStrings("Q", game_normal[2].key);
+    try testing.expectEqualStrings("N", game_normal[3].key);
 }
 
 test "palette: keybar chip bg clears a contrast delta from every theme bg (R2a)" {
     const min_delta2: u32 = 60 * 60;
     for ([_]renderer.ThemeId{ .classic, .wood, .green, .blue }) |id| {
         const p = renderer.palette(id);
-        try testing.expect(colorDist2(p.keybar_chip_bg, p.bg) >= min_delta2);
+        try testing.expect(renderer.colorDist2(p.keybar_chip_bg, p.bg) >= min_delta2);
         // The key glyph must read against its own chip background.
-        try testing.expect(colorDist2(p.keybar_chip_fg, p.keybar_chip_bg) >= min_delta2);
+        try testing.expect(renderer.colorDist2(p.keybar_chip_fg, p.keybar_chip_bg) >= min_delta2);
     }
-}
-
-fn colorDist2(a: vaxis.Cell.Color, b: vaxis.Cell.Color) u32 {
-    var sum: u32 = 0;
-    for (0..3) |k| {
-        const d = @as(i32, a.rgb[k]) - @as(i32, b.rgb[k]);
-        sum += @intCast(d * d);
-    }
-    return sum;
 }
 
 test "render paints chips and clips at tiny widths without crashing" {

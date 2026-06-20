@@ -398,13 +398,7 @@ fn renderGame(vx: *vaxis.Vaxis, game_state: *const Game) void {
         });
         renderer.renderInfoPanel(info_win, game_state);
 
-        const bar_win = win.child(.{
-            .x_off = 0,
-            .y_off = win.height - keybar.height,
-            .width = win.width,
-            .height = keybar.height,
-        });
-        keybar.render(bar_win, keybar.gameChips(game_state));
+        keybar.renderBottom(win, keybar.gameChips(game_state));
     } else {
         renderer.renderResizeMessage(win);
     }
@@ -614,6 +608,12 @@ fn writeBackViewerAnalysis(
 /// White game.
 var review_flipped: ?bool = null;
 
+/// Seed the review board orientation: a previously toggled choice persists; an
+/// untoggled game opens to its own player perspective (R15a).
+fn reviewSeedFlip(persisted: ?bool, player_color: chess.Color) bool {
+    return persisted orelse (player_color == .black);
+}
+
 fn runGameViewer(
     io: Io,
     alloc: std.mem.Allocator,
@@ -643,7 +643,7 @@ fn runGameViewer(
 
     var viewer = ViewerState.init(&boards, &san_list, move_count);
     viewer.player_color = viewerPlayerColor(&parsed);
-    viewer.flipped = review_flipped orelse (viewer.player_color == .black);
+    viewer.flipped = reviewSeedFlip(review_flipped, viewer.player_color);
 
     // --- Analysis: cached if present, else backfill via a provisioned engine (U5) ---
     var pass_future: ?Io.Future(void) = null;
@@ -1255,4 +1255,11 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
+}
+
+test "reviewSeedFlip: persisted choice wins; else player perspective (R15a)" {
+    try std.testing.expect(!reviewSeedFlip(null, .white)); // white default: not flipped
+    try std.testing.expect(reviewSeedFlip(null, .black)); // black default: flipped
+    try std.testing.expect(reviewSeedFlip(true, .white)); // a toggled flip overrides the white default
+    try std.testing.expect(!reviewSeedFlip(false, .black)); // a toggled no-flip overrides the black default
 }

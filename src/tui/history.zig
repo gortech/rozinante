@@ -170,13 +170,7 @@ pub const HistoryScreen = struct {
             }
         }
 
-        const bar_win = win.child(.{
-            .x_off = 0,
-            .y_off = win.height - keybar.height,
-            .width = win.width,
-            .height = keybar.height,
-        });
-        keybar.render(bar_win, keybar.historyChips(total, self.delete_pending));
+        keybar.renderBottom(win, keybar.historyChips(total, self.delete_pending));
     }
 };
 

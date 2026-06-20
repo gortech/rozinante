@@ -187,15 +187,9 @@ pub const ViewerState = struct {
         });
         self.renderInfoPanel(info_win);
 
-        const bar_win = win.child(.{
-            .x_off = 0,
-            .y_off = win.height - keybar.height,
-            .width = win.width,
-            .height = keybar.height,
-        });
         const show_km = self.analysis_state == .ready and
             (if (self.analysis) |ga| ga.key_moment_count > 0 else false);
-        keybar.render(bar_win, keybar.reviewChips(show_km));
+        keybar.renderBottom(win, keybar.reviewChips(show_km));
     }
 
     fn renderInfoPanel(self: *ViewerState, win: Window) void {
@@ -231,8 +225,7 @@ pub const ViewerState = struct {
             },
         }
 
-        const keybind_lines: u16 = 0;
-        const avail_h = if (win.height > y + keybind_lines) win.height - y - keybind_lines else 0;
+        const avail_h = if (win.height > y) win.height - y else 0;
 
         if (avail_h > 0 and self.total > 0) {
             const san_list = self.san_list[0..self.total];

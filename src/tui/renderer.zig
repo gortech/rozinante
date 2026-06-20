@@ -701,8 +701,7 @@ pub fn renderInfoPanel(win: Window, game: *const Game) void {
     }
 
     // Move history
-    const keybind_lines: u16 = 0;
-    const avail_h = if (win.height > y + keybind_lines) win.height - y - keybind_lines else 0;
+    const avail_h = if (win.height > y) win.height - y else 0;
 
     if (avail_h > 0 and game.move_count > 0) {
         const total_pairs: u16 = @intCast((game.move_count + 1) / 2);
@@ -950,6 +949,12 @@ test "drawMarks: marks stay inside the cell rect (containment)" {
 
     // It actually drew: the cell's top-left corner is now a (multi-byte) mark glyph, not the sentinel.
     try testing.expect(!std.mem.eql(u8, "X", screen.readCell(cx, ry).?.char.grapheme));
+    // AE12: pin (top-left blue) and endangered-red (bottom-left) compose, each
+    // painting its own corner with its own color, neither clobbering the other.
+    try testing.expect(std.meta.eql(screen.readCell(cx, ry).?.style.fg, Theme.highlight_pin));
+    const bl = screen.readCell(cx, ry + 5).?;
+    try testing.expectEqualStrings(FULL, bl.char.grapheme);
+    try testing.expect(std.meta.eql(bl.style.fg, Theme.highlight_endangered_high));
 
     // No mark bled outside [cx, cx+12) x [ry, ry+6); vaxis clips to the window, not the cell.
     for (0..20) |yy| {
@@ -971,7 +976,7 @@ test "palette: classic reproduces the original RGBs (R12)" {
     try testing.expectEqual(Color{ .rgb = .{ 105, 70, 150 } }, p.light_square);
 }
 
-fn colorDist2(a: Color, b: Color) u32 {
+pub fn colorDist2(a: Color, b: Color) u32 {
     var sum: u32 = 0;
     for (0..3) |k| {
         const d = @as(i32, a.rgb[k]) - @as(i32, b.rgb[k]);
@@ -1076,11 +1081,27 @@ test "summary card shows em dash when accuracy is null (no rated move)" {
 }
 
 test "renderInfoPanel: in-game keys live in the keybar, not the panel (AE10)" {
-    var game = Game.init();
     var buf: [4096]u8 = undefined;
+
+    // Normal in-progress play: the panel carries no key footer.
+    var game = Game.init();
     const text = renderPanelToText(&buf, &game, 30);
-    // The footer keys moved to the bottom bar; the panel must not duplicate them.
     try testing.expect(std.mem.indexOf(u8, text, "Undo") == null);
     try testing.expect(std.mem.indexOf(u8, text, "Resign") == null);
     try testing.expect(std.mem.indexOf(u8, text, "Flip") == null);
+
+    // Confirm prompt: the question stays in the panel, the Y/N keys live in the bar.
+    var confirm = Game.init();
+    confirm.resign_pending = true;
+    const ctext = renderPanelToText(&buf, &confirm, 30);
+    try testing.expect(std.mem.indexOf(u8, ctext, "Resign?") != null);
+    try testing.expect(std.mem.indexOf(u8, ctext, "Y/Enter") == null);
+
+    // Game over: the R Review / N Menu / Q Quit footer moved to the bar.
+    var over = Game.init();
+    over.game_phase = .ended;
+    over.result = "1-0";
+    const otext = renderPanelToText(&buf, &over, 30);
+    try testing.expect(std.mem.indexOf(u8, otext, "Review") == null);
+    try testing.expect(std.mem.indexOf(u8, otext, "Menu") == null);
 }

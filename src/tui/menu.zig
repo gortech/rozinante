@@ -278,13 +278,7 @@ pub const Menu = struct {
         y += 2;
 
         // Keybind bar
-        const bar_win = win.child(.{
-            .x_off = 0,
-            .y_off = win.height - keybar.height,
-            .width = win.width,
-            .height = keybar.height,
-        });
-        keybar.render(bar_win, keybar.menuChips());
+        keybar.renderBottom(win, keybar.menuChips());
     }
 
     fn fieldStyle(active: bool) Cell.Style {
